@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod discovery;
 mod mihomo;
 mod models;
@@ -39,12 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secret = args
         .secret
         .or_else(|| discovered.as_ref().and_then(|info| info.secret.clone()));
+    let config_path = args
+        .config
+        .or_else(|| discovered.as_ref().map(|info| info.config_path.clone()));
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
-    let result = App::new(controller, secret).run(&mut terminal);
+    let result = App::new(controller, secret, config_path).run(&mut terminal);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

@@ -5,6 +5,7 @@ pub enum Page {
     Dashboard,
     Proxies,
     Rules,
+    Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

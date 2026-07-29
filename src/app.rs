@@ -1,8 +1,13 @@
+use crate::config::{self, ConfigSnapshot};
 use crate::mihomo::MihomoClient;
-use crate::models::{AppState, Page};
+use crate::models::{AppState, Page, Profile, Rule, RuleAction, RuleSet};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 pub struct App {
     pub state: AppState,
@@ -10,11 +15,27 @@ pub struct App {
     last_refresh: Instant,
     proxy_members_focused: bool,
     selected_proxy_member_index: usize,
+    config: ConfigSnapshot,
+    config_path: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(controller: Option<String>, secret: Option<String>) -> Self {
+    pub fn new(
+        controller: Option<String>,
+        secret: Option<String>,
+        config_path: Option<PathBuf>,
+    ) -> Self {
         let mut state = AppState::demo();
+        let config = config_path
+            .as_deref()
+            .map(config::load)
+            .transpose()
+            .unwrap_or_else(|error| {
+                state.status = format!("Config read error: {error}");
+                None
+            })
+            .unwrap_or_default();
+        apply_config(&mut state, &config);
         let client = controller
             .as_ref()
             .and_then(|url| MihomoClient::new(url, secret).ok());
@@ -28,6 +49,8 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(10),
             proxy_members_focused: false,
             selected_proxy_member_index: 0,
+            config,
+            config_path,
         }
     }
 
@@ -73,7 +96,8 @@ impl App {
                 self.state.page = match self.state.page {
                     Page::Dashboard => Page::Proxies,
                     Page::Proxies => Page::Rules,
-                    Page::Rules => Page::Dashboard,
+                    Page::Rules => Page::Config,
+                    Page::Config => Page::Dashboard,
                 };
                 self.state.selected = 0;
                 self.proxy_members_focused = false;
@@ -93,6 +117,12 @@ impl App {
             }
             KeyCode::Char('3') => {
                 self.state.page = Page::Rules;
+                self.state.selected = 0;
+                self.proxy_members_focused = false;
+                false
+            }
+            KeyCode::Char('4') => {
+                self.state.page = Page::Config;
                 self.state.selected = 0;
                 self.proxy_members_focused = false;
                 false
@@ -137,6 +167,10 @@ impl App {
                 self.last_refresh = Instant::now() - Duration::from_secs(10);
                 false
             }
+            KeyCode::Char('s') if self.state.page == Page::Rules => {
+                self.save_rules();
+                false
+            }
             KeyCode::Enter if self.state.page == Page::Proxies => {
                 if self.proxy_members_focused {
                     self.select_proxy();
@@ -154,6 +188,7 @@ impl App {
             Page::Dashboard => 1,
             Page::Proxies => self.state.proxies.len(),
             Page::Rules => self.state.rules.rules.len(),
+            Page::Config => self.config.providers.len(),
         };
         if len == 0 {
             return;
@@ -194,11 +229,12 @@ impl App {
             Constraint::Length(2),
         ])
         .split(area);
-        let tabs = Tabs::new(vec!["1 Dashboard", "2 Proxies", "3 Rules"])
+        let tabs = Tabs::new(vec!["1 Status", "2 Proxies", "3 Rules", "4 Config"])
             .select(match self.state.page {
                 Page::Dashboard => 0,
                 Page::Proxies => 1,
                 Page::Rules => 2,
+                Page::Config => 3,
             })
             .block(Block::bordered().title(" mihomo-tui "))
             .highlight_style(Style::default().fg(Color::Yellow));
@@ -207,10 +243,11 @@ impl App {
             Page::Dashboard => self.dashboard(frame, root[1]),
             Page::Proxies => self.proxies(frame, root[1]),
             Page::Rules => self.rules(frame, root[1]),
+            Page::Config => self.config(frame, root[1]),
         }
         frame.render_widget(
             Paragraph::new(format!(
-                " {} | Tab/1-3 page  j/k move  Right/Enter nodes  Left groups  Enter apply  r refresh  q quit",
+                " {} | Tab/1-4 page  j/k move  Right/Enter nodes  Left groups  Enter apply  s save rules  r refresh  q quit",
                 self.state.status
             ))
             .style(Style::default().fg(Color::Gray)),
@@ -219,32 +256,48 @@ impl App {
     }
 
     fn dashboard(&self, frame: &mut Frame, area: Rect) {
-        let profile = self.state.profiles.first();
         let rows = vec![
-            ListItem::new(format!("Core       Mihomo API")),
+            ListItem::new("Core       Mihomo API"),
             ListItem::new(format!("Controller {}", self.state.controller)),
+            ListItem::new(format!(
+                "Config     {}",
+                self.config_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "not discovered".into())
+            )),
+            ListItem::new(format!("Mode       {}", self.config.mode)),
+            ListItem::new(format!(
+                "Mixed port {}",
+                self.config
+                    .mixed_port
+                    .map(|port| port.to_string())
+                    .unwrap_or_else(|| "not configured".into())
+            )),
+            ListItem::new(format!(
+                "TUN        {}",
+                if self.config.tun_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            )),
+            ListItem::new(format!(
+                "DNS        {} ({})",
+                if self.config.dns_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                self.config.dns_mode
+            )),
             ListItem::new(format!("Proxy groups {}", self.state.proxies.len())),
             ListItem::new(format!(
                 "Rules      {} enabled / {} total",
                 self.state.rules.rules.iter().filter(|r| r.enabled).count(),
                 self.state.rules.rules.len()
             )),
-            ListItem::new(format!("Profiles   {}", self.state.profiles.len())),
-            ListItem::new(format!(
-                "Active     {} ({})",
-                profile.map(|p| p.name.as_str()).unwrap_or("none"),
-                profile.map(|p| p.kind.as_str()).unwrap_or("-")
-            )),
-            ListItem::new(format!(
-                "Source     {} | updated {} | {}",
-                profile.map(|p| p.source.as_str()).unwrap_or("-"),
-                profile.map(|p| p.updated.as_str()).unwrap_or("-"),
-                if profile.is_some_and(|p| p.enabled) {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            )),
+            ListItem::new(format!("Providers  {}", self.config.providers.len())),
         ];
         frame.render_widget(
             List::new(rows)
@@ -369,6 +422,41 @@ impl App {
             as usize;
     }
 
+    fn save_rules(&mut self) {
+        let Some(path) = self.config_path.as_deref() else {
+            self.state.status = "No Mihomo config path discovered".into();
+            return;
+        };
+        let rules = self
+            .state
+            .rules
+            .rules
+            .iter()
+            .filter(|rule| rule.enabled)
+            .map(|rule| crate::config::ConfigRule {
+                kind: rule.kind.clone(),
+                value: rule.value.clone(),
+                action: rule.action.label().to_string(),
+            })
+            .collect::<Vec<_>>();
+        match config::save_rules(path, &rules) {
+            Ok(backup) => match Command::new("systemctl")
+                .args(["reload", "mihomo"])
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    self.config.rules = rules;
+                    self.state.status = format!("Rules saved; backup {}", backup.display());
+                }
+                Ok(status) => self.state.status = format!("Rules saved, reload failed ({status})"),
+                Err(error) => {
+                    self.state.status = format!("Rules saved, reload unavailable: {error}")
+                }
+            },
+            Err(error) => self.state.status = format!("Rules not saved: {error}"),
+        }
+    }
+
     fn rules(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<Row> = self
             .state
@@ -398,7 +486,48 @@ impl App {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" Rules (Space toggle, J/K reorder) "));
+        .block(Block::bordered().title(" Rules (Space toggle, J/K reorder, s save) "));
+        frame.render_stateful_widget(
+            table,
+            area,
+            &mut TableState::default().with_selected(Some(self.state.selected)),
+        );
+    }
+
+    fn config(&self, frame: &mut Frame, area: Rect) {
+        let rows: Vec<Row> = self
+            .config
+            .providers
+            .iter()
+            .map(|provider| {
+                Row::new(vec![
+                    provider.name.clone(),
+                    provider.kind.clone(),
+                    provider.url.clone().unwrap_or_else(|| "-".into()),
+                    provider.path.clone().unwrap_or_else(|| "-".into()),
+                    provider
+                        .interval
+                        .map(|seconds| format!("{seconds}s"))
+                        .unwrap_or_else(|| "manual".into()),
+                ])
+            })
+            .collect();
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(15),
+                Constraint::Percentage(12),
+                Constraint::Percentage(32),
+                Constraint::Percentage(28),
+                Constraint::Percentage(13),
+            ],
+        )
+        .header(
+            Row::new(vec!["Provider", "Type", "URL", "Path", "Interval"])
+                .style(Style::default().fg(Color::Yellow)),
+        )
+        .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .block(Block::bordered().title(" Proxy providers "));
         frame.render_stateful_widget(
             table,
             area,
@@ -407,20 +536,59 @@ impl App {
     }
 }
 
+fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {
+    state.rules = RuleSet {
+        rules: config
+            .rules
+            .iter()
+            .map(|rule| {
+                Rule::new(
+                    &rule.kind,
+                    &rule.value,
+                    match rule.action.as_str() {
+                        "DIRECT" => RuleAction::Direct,
+                        "REJECT" | "REJECT-DROP" => RuleAction::Reject,
+                        "PROXY" => RuleAction::Proxy,
+                        group => RuleAction::Group(group.into()),
+                    },
+                )
+            })
+            .collect(),
+    };
+    state.profiles = config
+        .providers
+        .iter()
+        .map(|provider| Profile {
+            name: provider.name.clone(),
+            kind: provider.kind.clone(),
+            source: provider
+                .url
+                .clone()
+                .or_else(|| provider.path.clone())
+                .unwrap_or_else(|| "not configured".into()),
+            updated: provider
+                .interval
+                .map(|seconds| format!("every {seconds}s"))
+                .unwrap_or_else(|| "manual".into()),
+            enabled: true,
+        })
+        .collect();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn proxy_member_selection_starts_at_the_current_member() {
-        let app = App::new(None, None);
+        let app = App::new(None, None, None);
 
         assert_eq!(app.selected_proxy_member(), Some("Tokyo-01"));
     }
 
     #[test]
     fn proxy_member_navigation_does_not_change_the_proxy_group() {
-        let mut app = App::new(None, None);
+        let mut app = App::new(None, None, None);
 
         app.open_proxy_members();
         app.move_proxy_member(1);

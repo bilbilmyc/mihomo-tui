@@ -6,11 +6,12 @@ The project deliberately keeps Mihomo as the proxy core and focuses on the Linux
 
 ## Current MVP
 
-- Ratatui dashboard with Dashboard, Proxies, and Rules pages
+- Ratatui dashboard with Status, Proxies, Rules, and Config pages
 - Demo mode when no controller is supplied
 - Mihomo `/proxies` API discovery and refresh
 - Proxy-group selection through the controller API
-- Rule enable/disable and priority reordering in memory
+- Reads the active Mihomo YAML for rules, providers, TUN, DNS, port, and mode
+- Rule enable/disable and priority reordering with validated save, backup, and service reload
 - ASCII-compatible UI for SSH terminals without Nerd Fonts
 
 ## Run
@@ -37,13 +38,16 @@ cargo run
 
 Keys:
 
-- `1`, `2`, `3`: switch pages
+- `1`, `2`, `3`, `4`: switch pages
 - `Tab`: next page
 - `j`/`k` or arrow keys: move selection
 - `r`: refresh Mihomo data
-- `Enter`: select the first member of the selected proxy group
+- `Right` or `Enter`: enter the selected proxy group's node list
+- `Left`: return to proxy groups
+- `Enter`: apply the selected node when the node list is focused
 - `Space`: enable/disable a rule
 - `J`/`K`: move a rule down/up
+- `s`: save rules, validate the candidate YAML, create a backup, and reload Mihomo
 - `q` or `Esc`: quit
 
 ## Planned slices

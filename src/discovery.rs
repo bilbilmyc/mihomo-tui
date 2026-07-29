@@ -8,6 +8,7 @@ use std::{
 pub struct ConnectionInfo {
     pub controller: String,
     pub secret: Option<String>,
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,7 @@ fn read_config(path: &Path) -> Option<ConnectionInfo> {
     Some(ConnectionInfo {
         controller,
         secret: config.secret.filter(|value| !value.is_empty()),
+        config_path: path.to_path_buf(),
     })
 }
 
