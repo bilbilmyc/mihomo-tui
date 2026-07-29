@@ -1,6 +1,6 @@
 use crate::config::{self, ConfigSnapshot};
 use crate::mihomo::MihomoClient;
-use crate::models::{AppState, Page, Profile, Rule, RuleAction, RuleSet};
+use crate::models::{AppState, Page, Rule, RuleAction, RuleSet};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
 use std::{
@@ -69,12 +69,11 @@ impl App {
         loop {
             self.refresh();
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    if self.handle_key(key) {
-                        break;
-                    }
-                }
+            if event::poll(Duration::from_millis(250))?
+                && let Event::Key(key) = event::read()?
+                && self.handle_key(key)
+            {
+                break;
             }
         }
         Ok(())
@@ -743,24 +742,6 @@ fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {
             })
             .collect(),
     };
-    state.profiles = config
-        .providers
-        .iter()
-        .map(|provider| Profile {
-            name: provider.name.clone(),
-            kind: provider.kind.clone(),
-            source: provider
-                .url
-                .clone()
-                .or_else(|| provider.path.clone())
-                .unwrap_or_else(|| "not configured".into()),
-            updated: provider
-                .interval
-                .map(|seconds| format!("every {seconds}s"))
-                .unwrap_or_else(|| "manual".into()),
-            enabled: true,
-        })
-        .collect();
 }
 
 #[cfg(test)]

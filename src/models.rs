@@ -81,20 +81,10 @@ pub struct ProxySummary {
 }
 
 #[derive(Debug, Clone)]
-pub struct Profile {
-    pub name: String,
-    pub kind: String,
-    pub source: String,
-    pub updated: String,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct AppState {
     pub page: Page,
     pub proxies: Vec<ProxySummary>,
     pub rules: RuleSet,
-    pub profiles: Vec<Profile>,
     pub selected: usize,
     pub status: String,
     pub controller: String,
@@ -128,13 +118,6 @@ impl AppState {
                     Rule::new("MATCH", "all", RuleAction::Group("Proxy".into())),
                 ],
             },
-            profiles: vec![Profile {
-                name: "Demo profile".into(),
-                kind: "local".into(),
-                source: "built-in demo".into(),
-                updated: "not connected".into(),
-                enabled: true,
-            }],
             selected: 0,
             status: "Demo mode - pass --controller to connect Mihomo".into(),
             controller: "demo".into(),
