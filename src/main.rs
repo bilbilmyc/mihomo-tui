@@ -11,7 +11,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::{io::stdout, path::PathBuf};
+use std::{io::stdout, path::PathBuf, process::Command};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = args
         .config
         .or_else(|| discovered.as_ref().map(|info| info.config_path.clone()));
+    ensure_mihomo_background_service();
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
@@ -53,4 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+fn ensure_mihomo_background_service() {
+    let _ = Command::new("systemctl").args(["start", "mihomo"]).status();
 }

@@ -48,7 +48,7 @@ impl App {
             .and_then(|url| MihomoClient::new(url, secret).ok());
         if let Some(url) = controller {
             state.controller = url;
-            state.status = "Connecting to Mihomo...".into();
+            state.status = "正在连接 Mihomo...".into();
         }
         Self {
             state,
@@ -88,9 +88,9 @@ impl App {
         match self.client.as_ref().unwrap().proxies() {
             Ok(proxies) => {
                 self.state.proxies = proxies;
-                self.state.status = "Connected - proxies refreshed".into();
+                self.state.status = "已连接，代理列表已刷新".into();
             }
-            Err(error) => self.state.status = format!("API error: {error}"),
+            Err(error) => self.state.status = format!("API 错误：{error}"),
         }
     }
 
@@ -361,14 +361,14 @@ impl App {
             Constraint::Length(2),
         ])
         .split(area);
-        let tabs = Tabs::new(vec!["1 Status", "2 Proxies", "3 Rules", "4 Config"])
+        let tabs = Tabs::new(vec!["1 状态", "2 代理", "3 规则", "4 配置"])
             .select(match self.state.page {
                 Page::Dashboard => 0,
                 Page::Proxies => 1,
                 Page::Rules => 2,
                 Page::Config => 3,
             })
-            .block(Block::bordered().title(" mihomo-tui "))
+            .block(Block::bordered().title(" mihomo-tui 控制台 "))
             .highlight_style(Style::default().fg(Color::Yellow));
         frame.render_widget(tabs, root[0]);
         match self.state.page {
@@ -382,7 +382,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                " {} | Tab/1-4 page  j/k move  t/d TUN/DNS  Right/Enter nodes  Left groups  Enter apply  s save rules  r refresh  q quit",
+                " {} | Tab/1-4 页面  j/k 移动  t/d 切换 TUN/DNS  右/回车选节点  左返回组  回车应用  s 保存规则  r 刷新  q 退出界面",
                 self.state.status
             ))
             .style(Style::default().fg(Color::Gray)),
@@ -392,51 +392,51 @@ impl App {
 
     fn dashboard(&self, frame: &mut Frame, area: Rect) {
         let rows = vec![
-            ListItem::new("Core       Mihomo API"),
-            ListItem::new(format!("Controller {}", self.state.controller)),
+            ListItem::new("核心       Mihomo API"),
+            ListItem::new(format!("控制器     {}", self.state.controller)),
             ListItem::new(format!(
-                "Config     {}",
+                "配置文件   {}",
                 self.config_path
                     .as_deref()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "not discovered".into())
+                    .unwrap_or_else(|| "未发现".into())
             )),
-            ListItem::new(format!("Mode       {}", self.config.mode)),
+            ListItem::new(format!("模式       {}", self.config.mode)),
             ListItem::new(format!(
-                "Mixed port {}",
+                "混合端口   {}",
                 self.config
                     .mixed_port
                     .map(|port| port.to_string())
-                    .unwrap_or_else(|| "not configured".into())
+                    .unwrap_or_else(|| "未配置".into())
             )),
             ListItem::new(format!(
-                "TUN        {} (t toggle)",
+                "TUN        {} (t 切换)",
                 if self.config.tun_enabled {
-                    "enabled"
+                    "已启用"
                 } else {
-                    "disabled"
+                    "已关闭"
                 }
             )),
             ListItem::new(format!(
-                "DNS        {} ({}, d toggle)",
+                "DNS        {} ({}, d 切换)",
                 if self.config.dns_enabled {
-                    "enabled"
+                    "已启用"
                 } else {
-                    "disabled"
+                    "已关闭"
                 },
                 self.config.dns_mode
             )),
-            ListItem::new(format!("Proxy groups {}", self.state.proxies.len())),
+            ListItem::new(format!("代理组     {}", self.state.proxies.len())),
             ListItem::new(format!(
-                "Rules      {} enabled / {} total",
+                "规则       {} 条启用 / 共 {} 条",
                 self.state.rules.rules.iter().filter(|r| r.enabled).count(),
                 self.state.rules.rules.len()
             )),
-            ListItem::new(format!("Providers  {}", self.config.providers.len())),
+            ListItem::new(format!("订阅源     {}", self.config.providers.len())),
         ];
         frame.render_widget(
             List::new(rows)
-                .block(Block::bordered().title(" Overview "))
+                .block(Block::bordered().title(" 运行状态 "))
                 .highlight_style(Style::default().fg(Color::Cyan)),
             area,
         );
@@ -472,11 +472,11 @@ impl App {
             ],
         )
         .header(
-            Row::new(vec!["Group", "Type", "Current", "Delay", "Nodes"])
+            Row::new(vec!["代理组", "类型", "当前节点", "延迟", "节点数"])
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" Proxy groups "));
+        .block(Block::bordered().title(" 代理组 "));
         frame.render_stateful_widget(
             table,
             columns[0],
@@ -506,8 +506,8 @@ impl App {
             .state
             .proxies
             .get(self.state.selected)
-            .map(|proxy| format!(" Nodes: {} ", proxy.name))
-            .unwrap_or_else(|| " Nodes ".into());
+            .map(|proxy| format!(" 节点：{} ", proxy.name))
+            .unwrap_or_else(|| " 节点 ".into());
         frame.render_widget(
             List::new(members)
                 .block(Block::bordered().title(title))
@@ -639,11 +639,11 @@ impl App {
             ],
         )
         .header(
-            Row::new(vec!["State", "Type", "Match", "Action"])
+            Row::new(vec!["状态", "类型", "匹配项", "动作"])
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" Rules (Space toggle, J/K reorder, s save) "));
+        .block(Block::bordered().title(" 规则（空格开关，J/K 排序，s 保存） "));
         frame.render_stateful_widget(
             table,
             area,
@@ -680,11 +680,11 @@ impl App {
             ],
         )
         .header(
-            Row::new(vec!["Provider", "Type", "URL", "Path", "Interval"])
+            Row::new(vec!["订阅名", "类型", "URL", "路径", "周期"])
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" Proxy providers (a add, r refresh HTTP provider) "));
+        .block(Block::bordered().title(" 代理订阅（a 新增，r 刷新 HTTP 订阅） "));
         frame.render_stateful_widget(
             table,
             area,
@@ -694,15 +694,19 @@ impl App {
 
     fn add_provider_dialog(&self, frame: &mut Frame, dialog: &AddProviderDialog) {
         let area = centered_rect(70, 9, frame.area());
-        let name_label = if dialog.editing_url { "Name" } else { "> Name" };
+        let name_label = if dialog.editing_url {
+            "名称"
+        } else {
+            "> 名称"
+        };
         let url_label = if dialog.editing_url { "> URL" } else { "URL" };
         frame.render_widget(Clear, area);
         frame.render_widget(
             Paragraph::new(format!(
-                "{name_label}: {}\n{url_label}: {}\n\nTab switch field  Enter save  Esc cancel",
+                "{name_label}: {}\n{url_label}: {}\n\nTab 切换字段  回车保存  Esc 取消",
                 dialog.name, dialog.url
             ))
-            .block(Block::bordered().title(" Add HTTP subscription "))
+            .block(Block::bordered().title(" 新增 HTTP 订阅 "))
             .style(Style::default().fg(Color::White)),
             area,
         );
