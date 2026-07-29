@@ -136,6 +136,26 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
     write_validated(path, &document)
 }
 
+pub fn set_boolean(
+    path: &Path,
+    section: &str,
+    key: &str,
+    enabled: bool,
+) -> Result<PathBuf, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
+    let root = document
+        .as_mapping_mut()
+        .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
+    let section_value = root
+        .entry(Value::String(section.into()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .ok_or_else(|| format!("{section} must be a mapping"))?;
+    section_value.insert(Value::String(key.into()), Value::Bool(enabled));
+    write_validated(path, &document)
+}
+
 fn write_validated(path: &Path, document: &Value) -> Result<PathBuf, String> {
     let serialized = serde_yaml::to_string(document).map_err(|error| error.to_string())?;
     let parent = path

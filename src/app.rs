@@ -146,6 +146,14 @@ impl App {
                 });
                 false
             }
+            KeyCode::Char('t') if self.state.page == Page::Dashboard => {
+                self.toggle_feature("tun", "enable", !self.config.tun_enabled);
+                false
+            }
+            KeyCode::Char('d') if self.state.page == Page::Dashboard => {
+                self.toggle_feature("dns", "enable", !self.config.dns_enabled);
+                false
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.state.page == Page::Proxies && self.proxy_members_focused {
                     self.move_proxy_member(1);
@@ -284,6 +292,43 @@ impl App {
         }
     }
 
+    fn toggle_feature(&mut self, section: &str, key: &str, enabled: bool) {
+        let Some(path) = self.config_path.as_deref() else {
+            self.state.status = "No Mihomo config path discovered".into();
+            return;
+        };
+        match config::set_boolean(path, section, key, enabled) {
+            Ok(backup) => match Command::new("systemctl")
+                .args(["reload", "mihomo"])
+                .status()
+            {
+                Ok(status) if status.success() => match config::load(path) {
+                    Ok(snapshot) => {
+                        apply_config(&mut self.state, &snapshot);
+                        self.config = snapshot;
+                        self.state.status = format!(
+                            "{} {}; backup {}",
+                            section,
+                            if enabled { "enabled" } else { "disabled" },
+                            backup.display()
+                        );
+                    }
+                    Err(error) => {
+                        self.state.status =
+                            format!("Saved {section}, but config reload failed: {error}")
+                    }
+                },
+                Ok(status) => {
+                    self.state.status = format!("Saved {section}, reload failed ({status})")
+                }
+                Err(error) => {
+                    self.state.status = format!("Saved {section}, reload unavailable: {error}")
+                }
+            },
+            Err(error) => self.state.status = format!("{section} not changed: {error}"),
+        }
+    }
+
     fn select_proxy(&mut self) {
         let Some(client) = &self.client else {
             self.state.status = "Demo mode: no API action".into();
@@ -337,7 +382,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                " {} | Tab/1-4 page  j/k move  Right/Enter nodes  Left groups  Enter apply  s save rules  r refresh  q quit",
+                " {} | Tab/1-4 page  j/k move  t/d TUN/DNS  Right/Enter nodes  Left groups  Enter apply  s save rules  r refresh  q quit",
                 self.state.status
             ))
             .style(Style::default().fg(Color::Gray)),
@@ -365,7 +410,7 @@ impl App {
                     .unwrap_or_else(|| "not configured".into())
             )),
             ListItem::new(format!(
-                "TUN        {}",
+                "TUN        {} (t toggle)",
                 if self.config.tun_enabled {
                     "enabled"
                 } else {
@@ -373,7 +418,7 @@ impl App {
                 }
             )),
             ListItem::new(format!(
-                "DNS        {} ({})",
+                "DNS        {} ({}, d toggle)",
                 if self.config.dns_enabled {
                     "enabled"
                 } else {
