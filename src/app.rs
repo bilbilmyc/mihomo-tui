@@ -17,6 +17,13 @@ pub struct App {
     selected_proxy_member_index: usize,
     config: ConfigSnapshot,
     config_path: Option<PathBuf>,
+    add_provider: Option<AddProviderDialog>,
+}
+
+struct AddProviderDialog {
+    name: String,
+    url: String,
+    editing_url: bool,
 }
 
 impl App {
@@ -51,6 +58,7 @@ impl App {
             selected_proxy_member_index: 0,
             config,
             config_path,
+            add_provider: None,
         }
     }
 
@@ -87,6 +95,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.add_provider.is_some() {
+            return self.handle_add_provider_key(key);
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
         }
@@ -127,6 +138,14 @@ impl App {
                 self.proxy_members_focused = false;
                 false
             }
+            KeyCode::Char('a') if self.state.page == Page::Config => {
+                self.add_provider = Some(AddProviderDialog {
+                    name: String::new(),
+                    url: String::new(),
+                    editing_url: false,
+                });
+                false
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.state.page == Page::Proxies && self.proxy_members_focused {
                     self.move_proxy_member(1);
@@ -163,6 +182,10 @@ impl App {
                 self.state.rules.move_rule(self.state.selected, -1);
                 false
             }
+            KeyCode::Char('r') if self.state.page == Page::Config => {
+                self.refresh_provider();
+                false
+            }
             KeyCode::Char('r') => {
                 self.last_refresh = Instant::now() - Duration::from_secs(10);
                 false
@@ -195,6 +218,70 @@ impl App {
         }
         self.state.selected =
             ((self.state.selected as isize + delta).rem_euclid(len as isize)) as usize;
+    }
+
+    fn handle_add_provider_key(&mut self, key: KeyEvent) -> bool {
+        let Some(dialog) = self.add_provider.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => self.add_provider = None,
+            KeyCode::Tab => dialog.editing_url = !dialog.editing_url,
+            KeyCode::Backspace => {
+                if dialog.editing_url {
+                    dialog.url.pop();
+                } else {
+                    dialog.name.pop();
+                }
+            }
+            KeyCode::Char(character) => {
+                if dialog.editing_url {
+                    dialog.url.push(character);
+                } else {
+                    dialog.name.push(character);
+                }
+            }
+            KeyCode::Enter if dialog.editing_url => self.commit_add_provider(),
+            KeyCode::Enter => dialog.editing_url = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn commit_add_provider(&mut self) {
+        let Some(dialog) = self.add_provider.take() else {
+            return;
+        };
+        let Some(path) = self.config_path.as_deref() else {
+            self.state.status = "No Mihomo config path discovered".into();
+            return;
+        };
+        match config::add_http_provider(path, &dialog.name, &dialog.url) {
+            Ok(backup) => match Command::new("systemctl")
+                .args(["reload", "mihomo"])
+                .status()
+            {
+                Ok(status) if status.success() => match config::load(path) {
+                    Ok(snapshot) => {
+                        apply_config(&mut self.state, &snapshot);
+                        self.config = snapshot;
+                        self.state.status =
+                            format!("Added {}; backup {}", dialog.name, backup.display());
+                    }
+                    Err(error) => {
+                        self.state.status =
+                            format!("Added provider but could not reread config: {error}")
+                    }
+                },
+                Ok(status) => {
+                    self.state.status = format!("Provider saved, reload failed ({status})")
+                }
+                Err(error) => {
+                    self.state.status = format!("Provider saved, reload unavailable: {error}")
+                }
+            },
+            Err(error) => self.state.status = format!("Provider not added: {error}"),
+        }
     }
 
     fn select_proxy(&mut self) {
@@ -244,6 +331,9 @@ impl App {
             Page::Proxies => self.proxies(frame, root[1]),
             Page::Rules => self.rules(frame, root[1]),
             Page::Config => self.config(frame, root[1]),
+        }
+        if let Some(dialog) = &self.add_provider {
+            self.add_provider_dialog(frame, dialog);
         }
         frame.render_widget(
             Paragraph::new(format!(
@@ -457,6 +547,28 @@ impl App {
         }
     }
 
+    fn refresh_provider(&mut self) {
+        let Some(provider) = self.config.providers.get(self.state.selected) else {
+            self.state.status = "No proxy provider selected".into();
+            return;
+        };
+        if provider.kind != "http" {
+            self.state.status = format!(
+                "{} is a {} provider; update its source file instead",
+                provider.name, provider.kind
+            );
+            return;
+        }
+        let Some(client) = &self.client else {
+            self.state.status = "No Mihomo controller available".into();
+            return;
+        };
+        match client.refresh_provider(&provider.name) {
+            Ok(()) => self.state.status = format!("{} subscription refreshed", provider.name),
+            Err(error) => self.state.status = format!("Provider update failed: {error}"),
+        }
+    }
+
     fn rules(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<Row> = self
             .state
@@ -527,13 +639,40 @@ impl App {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" Proxy providers "));
+        .block(Block::bordered().title(" Proxy providers (a add, r refresh HTTP provider) "));
         frame.render_stateful_widget(
             table,
             area,
             &mut TableState::default().with_selected(Some(self.state.selected)),
         );
     }
+
+    fn add_provider_dialog(&self, frame: &mut Frame, dialog: &AddProviderDialog) {
+        let area = centered_rect(70, 9, frame.area());
+        let name_label = if dialog.editing_url { "Name" } else { "> Name" };
+        let url_label = if dialog.editing_url { "> URL" } else { "URL" };
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{name_label}: {}\n{url_label}: {}\n\nTab switch field  Enter save  Esc cancel",
+                dialog.name, dialog.url
+            ))
+            .block(Block::bordered().title(" Add HTTP subscription "))
+            .style(Style::default().fg(Color::White)),
+            area,
+        );
+    }
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width.saturating_sub(2));
+    let height = height.min(area.height.saturating_sub(2));
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {

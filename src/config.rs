@@ -76,7 +76,68 @@ pub fn save_rules(path: &Path, rules: &[ConfigRule]) -> Result<PathBuf, String> 
         .map(|rule| Value::String(format!("{},{},{}", rule.kind, rule.value, rule.action)))
         .collect();
     root.insert(Value::String("rules".into()), Value::Sequence(entries));
-    let serialized = serde_yaml::to_string(&document).map_err(|error| error.to_string())?;
+    write_validated(path, &document)
+}
+
+pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || name.len() > 48
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Provider name must use letters, digits, - or _, up to 48 characters".into());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Subscription URL must start with https:// or http://".into());
+    }
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
+    let root = document
+        .as_mapping_mut()
+        .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
+    let providers = root
+        .entry(Value::String("proxy-providers".into()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .ok_or_else(|| "proxy-providers must be a mapping".to_string())?;
+    if providers.contains_key(Value::String(name.into())) {
+        return Err(format!("Provider {name} already exists"));
+    }
+    let mut provider = Mapping::new();
+    provider.insert(Value::String("type".into()), Value::String("http".into()));
+    provider.insert(Value::String("url".into()), Value::String(url.into()));
+    provider.insert(
+        Value::String("path".into()),
+        Value::String(format!("./proxy-providers/{name}.yaml")),
+    );
+    provider.insert(
+        Value::String("interval".into()),
+        Value::Number(86_400.into()),
+    );
+    providers.insert(Value::String(name.into()), Value::Mapping(provider));
+    let groups = root
+        .entry(Value::String("proxy-groups".into()))
+        .or_insert_with(|| Value::Sequence(Vec::new()))
+        .as_sequence_mut()
+        .ok_or_else(|| "proxy-groups must be a list".to_string())?;
+    let mut group = Mapping::new();
+    group.insert(Value::String("name".into()), Value::String(name.into()));
+    group.insert(Value::String("type".into()), Value::String("select".into()));
+    group.insert(
+        Value::String("use".into()),
+        Value::Sequence(vec![Value::String(name.into())]),
+    );
+    group.insert(
+        Value::String("proxies".into()),
+        Value::Sequence(vec![Value::String("DIRECT".into())]),
+    );
+    groups.push(Value::Mapping(group));
+    write_validated(path, &document)
+}
+
+fn write_validated(path: &Path, document: &Value) -> Result<PathBuf, String> {
+    let serialized = serde_yaml::to_string(document).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "config path has no parent directory".to_string())?;

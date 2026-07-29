@@ -99,4 +99,39 @@ impl MihomoClient {
             Err(format!("Mihomo returned {}", response.status()))
         }
     }
+
+    pub fn refresh_provider(&self, name: &str) -> Result<(), String> {
+        let response = self
+            .request(self.http.put(self.provider_url(name)))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Mihomo returned {}", response.status()))
+        }
+    }
+
+    fn provider_url(&self, name: &str) -> String {
+        format!(
+            "{}/providers/proxies/{}",
+            self.base_url,
+            urlencoding::encode(name)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_refresh_url_escapes_provider_names() {
+        let client = MihomoClient::new("http://127.0.0.1:9090", None).unwrap();
+
+        assert_eq!(
+            client.provider_url("my provider"),
+            "http://127.0.0.1:9090/providers/proxies/my%20provider"
+        );
+    }
 }
