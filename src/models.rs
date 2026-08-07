@@ -13,6 +13,7 @@ pub enum RuleAction {
     Proxy,
     Direct,
     Reject,
+    RejectDrop,
     Group(String),
 }
 
@@ -22,6 +23,7 @@ impl RuleAction {
             Self::Proxy => "PROXY",
             Self::Direct => "DIRECT",
             Self::Reject => "REJECT",
+            Self::RejectDrop => "REJECT-DROP",
             Self::Group(name) => name,
         }
     }
@@ -32,7 +34,9 @@ pub struct Rule {
     pub kind: String,
     pub value: String,
     pub action: RuleAction,
+    pub extra: Vec<String>,
     pub enabled: bool,
+    pub raw: Option<String>,
 }
 
 impl Rule {
@@ -41,8 +45,20 @@ impl Rule {
             kind: kind.into(),
             value: value.into(),
             action,
+            extra: Vec::new(),
             enabled: true,
+            raw: None,
         }
+    }
+
+    pub fn with_raw(mut self, raw: Option<String>) -> Self {
+        self.raw = raw;
+        self
+    }
+
+    pub fn with_extra(mut self, extra: Vec<String>) -> Self {
+        self.extra = extra;
+        self
     }
 }
 
@@ -78,6 +94,24 @@ pub struct ProxySummary {
     pub now: Option<String>,
     pub delay_ms: Option<u64>,
     pub members: Vec<String>,
+    pub member_delays: std::collections::BTreeMap<String, ProxyDelay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyDelay {
+    Measured(u64),
+    Timeout,
+    Failed,
+}
+
+impl ProxyDelay {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Measured(delay) => format!("{delay} ms"),
+            Self::Timeout => "timeout".into(),
+            Self::Failed => "failed".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +135,7 @@ impl AppState {
                     now: Some("Tokyo-01".into()),
                     delay_ms: Some(86),
                     members: vec!["Tokyo-01".into(), "Singapore-02".into(), "DIRECT".into()],
+                    member_delays: std::collections::BTreeMap::new(),
                 },
                 ProxySummary {
                     name: "Auto".into(),
@@ -108,6 +143,7 @@ impl AppState {
                     now: Some("Singapore-02".into()),
                     delay_ms: Some(112),
                     members: vec!["Tokyo-01".into(), "Singapore-02".into()],
+                    member_delays: std::collections::BTreeMap::new(),
                 },
             ],
             rules: RuleSet {
@@ -148,5 +184,12 @@ mod tests {
     fn action_labels_are_stable() {
         assert_eq!(RuleAction::Proxy.label(), "PROXY");
         assert_eq!(RuleAction::Group("Work".into()).label(), "Work");
+        assert_eq!(RuleAction::RejectDrop.label(), "REJECT-DROP");
+    }
+
+    #[test]
+    fn proxy_delay_labels_distinguish_timeouts_from_missing_data() {
+        assert_eq!(ProxyDelay::Measured(86).label(), "86 ms");
+        assert_eq!(ProxyDelay::Timeout.label(), "timeout");
     }
 }

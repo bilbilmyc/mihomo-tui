@@ -1,11 +1,17 @@
 use crate::config::{self, ConfigSnapshot};
+use crate::dialogs::{
+    DialogAction, NetworkSettings, RuleDialog, RuleDialogMode, SettingsDialog, centered_rect,
+    draw_rule_dialog, draw_settings_dialog,
+};
 use crate::mihomo::MihomoClient;
-use crate::models::{AppState, Page, Rule, RuleAction, RuleSet};
+use crate::models::{AppState, Page, ProxyDelay, ProxySummary, Rule, RuleAction, RuleSet};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -18,12 +24,37 @@ pub struct App {
     config: ConfigSnapshot,
     config_path: Option<PathBuf>,
     add_provider: Option<AddProviderDialog>,
+    settings_dialog: Option<SettingsDialog>,
+    rule_dialog: Option<RuleDialog>,
+    worker_tx: Sender<WorkerResult>,
+    worker_rx: Receiver<WorkerResult>,
+    refresh_in_flight: bool,
+    provider_refresh_in_flight: bool,
+    delay_probe_in_flight: bool,
+    proxy_selection_in_flight: bool,
 }
 
 struct AddProviderDialog {
     name: String,
     url: String,
     editing_url: bool,
+}
+
+enum WorkerResult {
+    Proxies(Result<Vec<ProxySummary>, String>),
+    ProxySelected {
+        group: String,
+        target: String,
+        result: Result<(), String>,
+    },
+    DelayMeasured {
+        target: String,
+        result: Result<ProxyDelay, String>,
+    },
+    ProviderRefreshed {
+        name: String,
+        result: Result<Vec<ProxySummary>, String>,
+    },
 }
 
 impl App {
@@ -33,16 +64,20 @@ impl App {
         config_path: Option<PathBuf>,
     ) -> Self {
         let mut state = AppState::demo();
-        let config = config_path
-            .as_deref()
-            .map(config::load)
-            .transpose()
-            .unwrap_or_else(|error| {
-                state.status = format!("Config read error: {error}");
-                None
-            })
-            .unwrap_or_default();
-        apply_config(&mut state, &config);
+        let config = if let Some(path) = config_path.as_deref() {
+            match config::load(path) {
+                Ok(snapshot) => {
+                    apply_config(&mut state, &snapshot);
+                    snapshot
+                }
+                Err(error) => {
+                    state.status = format!("Config read error: {error}");
+                    ConfigSnapshot::default()
+                }
+            }
+        } else {
+            ConfigSnapshot::default()
+        };
         let client = controller
             .as_ref()
             .and_then(|url| MihomoClient::new(url, secret).ok());
@@ -50,6 +85,7 @@ impl App {
             state.controller = url;
             state.status = "正在连接 Mihomo...".into();
         }
+        let (worker_tx, worker_rx) = mpsc::channel();
         Self {
             state,
             client,
@@ -59,6 +95,14 @@ impl App {
             config,
             config_path,
             add_provider: None,
+            settings_dialog: None,
+            rule_dialog: None,
+            worker_tx,
+            worker_rx,
+            refresh_in_flight: false,
+            provider_refresh_in_flight: false,
+            delay_probe_in_flight: false,
+            proxy_selection_in_flight: false,
         }
     }
 
@@ -67,6 +111,7 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
+            self.process_worker_results();
             self.refresh();
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(250))?
@@ -80,25 +125,86 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        if self.client.is_none() || self.last_refresh.elapsed() < Duration::from_secs(5) {
+        if self.refresh_in_flight || self.last_refresh.elapsed() < Duration::from_secs(5) {
             return;
         }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         self.last_refresh = Instant::now();
-        match self.client.as_ref().unwrap().proxies() {
-            Ok(proxies) => {
-                self.state.proxies = proxies;
-                self.state.status = "已连接，代理列表已刷新".into();
+        self.refresh_in_flight = true;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(WorkerResult::Proxies(client.proxies()));
+        });
+    }
+
+    fn process_worker_results(&mut self) {
+        while let Ok(message) = self.worker_rx.try_recv() {
+            match message {
+                WorkerResult::Proxies(result) => {
+                    self.refresh_in_flight = false;
+                    match result {
+                        Ok(proxies) => apply_proxy_refresh(&mut self.state, proxies),
+                        Err(error) => self.state.status = format!("API 错误：{error}"),
+                    }
+                }
+                WorkerResult::ProxySelected {
+                    group,
+                    target,
+                    result,
+                } => {
+                    self.proxy_selection_in_flight = false;
+                    match result {
+                        Ok(()) => {
+                            if let Some(proxy) = self
+                                .state
+                                .proxies
+                                .iter_mut()
+                                .find(|proxy| proxy.name == group)
+                            {
+                                proxy.now = Some(target.clone());
+                            }
+                            self.state.status = format!("{group} -> {target}");
+                            self.last_refresh = Instant::now() - Duration::from_secs(10);
+                        }
+                        Err(error) => self.state.status = format!("节点切换失败：{error}"),
+                    }
+                }
+                WorkerResult::DelayMeasured { target, result } => {
+                    self.delay_probe_in_flight = false;
+                    match result {
+                        Ok(delay) => apply_delay_result(&mut self.state, &target, delay),
+                        Err(error) => self.state.status = format!("延迟测试失败：{error}"),
+                    }
+                }
+                WorkerResult::ProviderRefreshed { name, result } => {
+                    self.provider_refresh_in_flight = false;
+                    match result {
+                        Ok(proxies) => {
+                            apply_proxy_refresh(&mut self.state, proxies);
+                            self.last_refresh = Instant::now();
+                            self.state.status = format!("{name} 订阅及代理列表已刷新");
+                        }
+                        Err(error) => self.state.status = format!("订阅更新失败：{error}"),
+                    }
+                }
             }
-            Err(error) => self.state.status = format!("API 错误：{error}"),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if self.add_provider.is_some() {
-            return self.handle_add_provider_key(key);
-        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
+        }
+        if self.settings_dialog.is_some() {
+            return self.handle_settings_key(key);
+        }
+        if self.rule_dialog.is_some() {
+            return self.handle_rule_dialog_key(key);
+        }
+        if self.add_provider.is_some() {
+            return self.handle_add_provider_key(key);
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => true,
@@ -146,11 +252,11 @@ impl App {
                 false
             }
             KeyCode::Char('t') if self.state.page == Page::Dashboard => {
-                self.toggle_feature("tun", "enable", !self.config.tun_enabled);
+                self.settings_dialog = Some(SettingsDialog::tun(&self.config.tun));
                 false
             }
             KeyCode::Char('d') if self.state.page == Page::Dashboard => {
-                self.toggle_feature("dns", "enable", !self.config.dns_enabled);
+                self.settings_dialog = Some(SettingsDialog::dns(&self.config.dns));
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -173,6 +279,10 @@ impl App {
                 self.open_proxy_members();
                 false
             }
+            KeyCode::Right if self.state.page == Page::Config => {
+                self.open_provider_proxy_group();
+                false
+            }
             KeyCode::Left if self.state.page == Page::Proxies => {
                 self.proxy_members_focused = false;
                 false
@@ -181,12 +291,32 @@ impl App {
                 self.state.rules.toggle(self.state.selected);
                 false
             }
+            KeyCode::Char('x') if self.state.page == Page::Rules => {
+                self.state.rules.toggle(self.state.selected);
+                false
+            }
+            KeyCode::Char('a') if self.state.page == Page::Rules => {
+                self.open_rule_dialog(RuleDialogMode::InsertFront);
+                false
+            }
+            KeyCode::Char('A') if self.state.page == Page::Rules => {
+                self.open_rule_dialog(RuleDialogMode::InsertBack);
+                false
+            }
+            KeyCode::Char('e') if self.state.page == Page::Rules => {
+                self.open_rule_dialog(RuleDialogMode::Edit(self.state.selected));
+                false
+            }
             KeyCode::Char('J') if self.state.page == Page::Rules => {
-                self.state.rules.move_rule(self.state.selected, 1);
+                if self.state.rules.move_rule(self.state.selected, 1) {
+                    self.state.selected += 1;
+                }
                 false
             }
             KeyCode::Char('K') if self.state.page == Page::Rules => {
-                self.state.rules.move_rule(self.state.selected, -1);
+                if self.state.rules.move_rule(self.state.selected, -1) {
+                    self.state.selected -= 1;
+                }
                 false
             }
             KeyCode::Char('r') if self.state.page == Page::Config => {
@@ -195,6 +325,13 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.last_refresh = Instant::now() - Duration::from_secs(10);
+                self.state.status = "正在刷新代理列表...".into();
+                false
+            }
+            KeyCode::Char('l')
+                if self.state.page == Page::Proxies && self.proxy_members_focused =>
+            {
+                self.measure_proxy_delay();
                 false
             }
             KeyCode::Char('s') if self.state.page == Page::Rules => {
@@ -207,6 +344,10 @@ impl App {
                 } else {
                     self.open_proxy_members();
                 }
+                false
+            }
+            KeyCode::Enter if self.state.page == Page::Config => {
+                self.open_provider_proxy_group();
                 false
             }
             _ => false,
@@ -255,6 +396,144 @@ impl App {
         false
     }
 
+    fn handle_settings_key(&mut self, key: KeyEvent) -> bool {
+        let action = self
+            .settings_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key))
+            .unwrap_or(DialogAction::None);
+        match action {
+            DialogAction::None => {}
+            DialogAction::Close => self.settings_dialog = None,
+            DialogAction::Save => self.commit_settings_dialog(),
+        }
+        false
+    }
+
+    fn commit_settings_dialog(&mut self) {
+        let Some(path) = self.config_path.clone() else {
+            self.state.status = "未发现 Mihomo 配置路径".into();
+            return;
+        };
+        let pending = match self.settings_dialog.as_ref().map(SettingsDialog::value) {
+            Some(Ok(settings)) => settings,
+            Some(Err(error)) => {
+                self.state.status = format!("高级设置未保存：{error}");
+                return;
+            }
+            None => return,
+        };
+        let tun_enabling = matches!(
+            &pending,
+            NetworkSettings::Tun(settings) if settings.enable && !self.config.tun.enable
+        );
+        let result = match pending {
+            NetworkSettings::Tun(settings) => config::save_tun_settings(&path, &settings),
+            NetworkSettings::Dns(settings) => config::save_dns_settings(&path, &settings),
+        };
+        match result {
+            Ok(backup) => match self.finalize_config_change(&backup) {
+                Ok(()) => {
+                    self.settings_dialog = None;
+                    let mut status = format!("高级设置已保存；备份 {}", backup.display());
+                    if tun_enabling {
+                        let direct_rules = self.config.direct_rule_count();
+                        if direct_rules > 0 {
+                            status.push_str(&format!(
+                                "；仍有 {direct_rules} 条 DIRECT 规则，请检查直连可达性"
+                            ));
+                        }
+                    }
+                    self.state.status = status;
+                }
+                Err(error) => self.state.status = format!("高级设置未应用：{error}"),
+            },
+            Err(error) => self.state.status = format!("高级设置未保存：{error}"),
+        }
+    }
+
+    fn open_rule_dialog(&mut self, mode: RuleDialogMode) {
+        let original = match mode {
+            RuleDialogMode::Edit(index) => {
+                let Some(rule) = self.state.rules.rules.get(index).cloned() else {
+                    self.state.status = "未选择可编辑的规则".into();
+                    return;
+                };
+                Some(rule)
+            }
+            RuleDialogMode::InsertFront | RuleDialogMode::InsertBack => None,
+        };
+        self.rule_dialog = Some(RuleDialog::new(mode, original, self.rule_policy_options()));
+    }
+
+    fn rule_policy_options(&self) -> Vec<String> {
+        let mut policies = Vec::new();
+        for policy in self
+            .config
+            .proxy_groups
+            .iter()
+            .chain(self.state.proxies.iter().map(|proxy| &proxy.name))
+            .map(String::as_str)
+            .chain(["DIRECT", "REJECT", "REJECT-DROP"])
+        {
+            if !policies.iter().any(|existing| existing == policy) {
+                policies.push(policy.to_string());
+            }
+        }
+        policies
+    }
+
+    fn handle_rule_dialog_key(&mut self, key: KeyEvent) -> bool {
+        let action = self
+            .rule_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key))
+            .unwrap_or(DialogAction::None);
+        match action {
+            DialogAction::None => {}
+            DialogAction::Close => self.rule_dialog = None,
+            DialogAction::Save => self.commit_rule_dialog(),
+        }
+        false
+    }
+
+    fn commit_rule_dialog(&mut self) {
+        let Some(dialog) = self.rule_dialog.as_ref() else {
+            return;
+        };
+        let mode = dialog.mode();
+        let rule = match dialog.rule() {
+            Ok(rule) => rule,
+            Err(error) => {
+                self.state.status = format!("规则未应用：{error}");
+                return;
+            }
+        };
+        let status = match mode {
+            RuleDialogMode::InsertFront => {
+                self.state.rules.rules.insert(0, rule);
+                self.state.selected = 0;
+                "规则已新增到顶部；按 s 保存配置"
+            }
+            RuleDialogMode::InsertBack => {
+                self.state.rules.rules.push(rule);
+                self.state.selected = self.state.rules.rules.len().saturating_sub(1);
+                "规则已追加到底部；按 s 保存配置"
+            }
+            RuleDialogMode::Edit(index) => {
+                let Some(existing) = self.state.rules.rules.get_mut(index) else {
+                    self.state.status = "原规则已不存在".into();
+                    return;
+                };
+                *existing = rule;
+                self.state.selected = index;
+                "规则已更新；按 s 保存配置"
+            }
+        };
+        self.rule_dialog = None;
+        self.state.status = status.into();
+    }
+
     fn commit_add_provider(&mut self) {
         let Some(dialog) = self.add_provider.take() else {
             return;
@@ -264,72 +543,42 @@ impl App {
             return;
         };
         match config::add_http_provider(path, &dialog.name, &dialog.url) {
-            Ok(backup) => match Command::new("systemctl")
-                .args(["reload", "mihomo"])
-                .status()
-            {
-                Ok(status) if status.success() => match config::load(path) {
-                    Ok(snapshot) => {
-                        apply_config(&mut self.state, &snapshot);
-                        self.config = snapshot;
-                        self.state.status =
-                            format!("Added {}; backup {}", dialog.name, backup.display());
-                    }
-                    Err(error) => {
-                        self.state.status =
-                            format!("Added provider but could not reread config: {error}")
-                    }
-                },
-                Ok(status) => {
-                    self.state.status = format!("Provider saved, reload failed ({status})")
+            Ok(backup) => match self.finalize_config_change(&backup) {
+                Ok(()) => {
+                    self.state.status = format!("已新增 {}；备份 {}", dialog.name, backup.display())
                 }
-                Err(error) => {
-                    self.state.status = format!("Provider saved, reload unavailable: {error}")
-                }
+                Err(error) => self.state.status = format!("订阅未应用：{error}"),
             },
             Err(error) => self.state.status = format!("Provider not added: {error}"),
         }
     }
 
-    fn toggle_feature(&mut self, section: &str, key: &str, enabled: bool) {
-        let Some(path) = self.config_path.as_deref() else {
-            self.state.status = "No Mihomo config path discovered".into();
-            return;
-        };
-        match config::set_boolean(path, section, key, enabled) {
-            Ok(backup) => match Command::new("systemctl")
-                .args(["reload", "mihomo"])
-                .status()
-            {
-                Ok(status) if status.success() => match config::load(path) {
-                    Ok(snapshot) => {
-                        apply_config(&mut self.state, &snapshot);
-                        self.config = snapshot;
-                        self.state.status = format!(
-                            "{} {}; backup {}",
-                            section,
-                            if enabled { "enabled" } else { "disabled" },
-                            backup.display()
-                        );
-                    }
-                    Err(error) => {
-                        self.state.status =
-                            format!("Saved {section}, but config reload failed: {error}")
-                    }
-                },
-                Ok(status) => {
-                    self.state.status = format!("Saved {section}, reload failed ({status})")
-                }
-                Err(error) => {
-                    self.state.status = format!("Saved {section}, reload unavailable: {error}")
-                }
-            },
-            Err(error) => self.state.status = format!("{section} not changed: {error}"),
+    fn finalize_config_change(&mut self, backup: &Path) -> Result<(), String> {
+        let path = self
+            .config_path
+            .clone()
+            .ok_or_else(|| "未发现 Mihomo 配置路径".to_string())?;
+        let reload_result = reload_or_rollback(&path, backup, reload_mihomo_service);
+        let state_result = config::load(&path).map(|snapshot| {
+            apply_config(&mut self.state, &snapshot);
+            self.config = snapshot;
+        });
+        match (reload_result, state_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(error)) => Err(format!("核心已重载，但重新读取配置失败：{error}")),
+            (Err(error), Ok(())) => Err(error),
+            (Err(reload_error), Err(read_error)) => Err(format!(
+                "{reload_error}；重新读取恢复后的配置也失败：{read_error}"
+            )),
         }
     }
 
     fn select_proxy(&mut self) {
-        let Some(client) = &self.client else {
+        if self.proxy_selection_in_flight {
+            self.state.status = "正在切换节点...".into();
+            return;
+        }
+        let Some(client) = self.client.clone() else {
             self.state.status = "Demo mode: no API action".into();
             return;
         };
@@ -341,15 +590,72 @@ impl App {
         };
         let group = proxy.name.clone();
         let target = target.clone();
-        match client.select_proxy(&group, &target) {
-            Ok(()) => {
-                if let Some(proxy) = self.state.proxies.get_mut(self.state.selected) {
-                    proxy.now = Some(target.clone());
-                }
-                self.state.status = format!("{group} -> {target}");
-            }
-            Err(error) => self.state.status = format!("API error: {error}"),
+        self.proxy_selection_in_flight = true;
+        self.state.status = format!("正在切换 {group} -> {target}...");
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = client.select_proxy(&group, &target);
+            let _ = sender.send(WorkerResult::ProxySelected {
+                group,
+                target,
+                result,
+            });
+        });
+    }
+
+    fn open_provider_proxy_group(&mut self) {
+        let Some(provider) = self.config.providers.get(self.state.selected) else {
+            self.state.status = "No proxy provider selected".into();
+            return;
+        };
+        let provider_name = provider.name.clone();
+        let configured_groups = self.config.provider_groups.get(&provider_name);
+        let group_index = configured_groups
+            .into_iter()
+            .flatten()
+            .find_map(|group_name| {
+                self.state
+                    .proxies
+                    .iter()
+                    .position(|proxy| proxy.name == *group_name && !proxy.members.is_empty())
+            })
+            .or_else(|| {
+                self.state
+                    .proxies
+                    .iter()
+                    .position(|proxy| proxy.name == provider_name && !proxy.members.is_empty())
+            });
+        let Some(group_index) = group_index else {
+            self.state.status =
+                "No selectable proxy group found; refresh the subscription first".into();
+            return;
+        };
+        self.state.page = Page::Proxies;
+        self.state.selected = group_index;
+        self.open_proxy_members();
+        self.state.status = format!("{provider_name}：请选择节点并按 Enter 应用");
+    }
+
+    fn measure_proxy_delay(&mut self) {
+        if self.delay_probe_in_flight {
+            self.state.status = "延迟测试正在进行...".into();
+            return;
         }
+        let Some(client) = self.client.clone() else {
+            self.state.status = "No Mihomo controller available".into();
+            return;
+        };
+        let Some(target) = self.selected_proxy_member().map(str::to_owned) else {
+            self.state.status = "No proxy node selected".into();
+            return;
+        };
+        self.delay_probe_in_flight = true;
+        self.state.status = format!("正在测试 {target} 延迟...");
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = client.probe_delay(&target);
+            let _ = sender.send(WorkerResult::DelayMeasured { target, result });
+        });
     }
 
     fn draw(&self, frame: &mut Frame) {
@@ -357,7 +663,7 @@ impl App {
         let root = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(area);
         let tabs = Tabs::new(vec!["1 状态", "2 代理", "3 规则", "4 配置"])
@@ -379,14 +685,54 @@ impl App {
         if let Some(dialog) = &self.add_provider {
             self.add_provider_dialog(frame, dialog);
         }
+        if let Some(dialog) = &self.settings_dialog {
+            draw_settings_dialog(frame, dialog);
+        }
+        if let Some(dialog) = &self.rule_dialog {
+            draw_rule_dialog(frame, dialog);
+        }
+        let footer =
+            Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(root[2]);
         frame.render_widget(
-            Paragraph::new(format!(
-                " {} | Tab/1-4 页面  j/k 移动  t/d 切换 TUN/DNS  右/回车选节点  左返回组  回车应用  s 保存规则  r 刷新  q 退出界面",
-                self.state.status
-            ))
-            .style(Style::default().fg(Color::Gray)),
-            root[2],
+            Paragraph::new(format!(" {}", self.state.status))
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(Color::Gray)),
+            footer[0],
         );
+        frame.render_widget(
+            Paragraph::new(format!(" {}", self.shortcut_help()))
+                .style(Style::default().fg(Color::DarkGray)),
+            footer[1],
+        );
+    }
+
+    fn shortcut_help(&self) -> &'static str {
+        if self.add_provider.is_some() {
+            return "Tab 切换字段  Enter 保存  Esc 取消  Ctrl+C 退出";
+        }
+        if let Some(dialog) = &self.settings_dialog {
+            return if dialog.editing() {
+                "输入内容  Enter 完成  Esc 停止编辑  Ctrl+C 退出"
+            } else {
+                "j/k 字段  Enter/Space 修改  s 保存  Esc 取消"
+            };
+        }
+        if let Some(dialog) = &self.rule_dialog {
+            return if dialog.selecting() {
+                "↑/↓ 选择  Space/Enter 确认  Esc 返回  Ctrl+C 退出"
+            } else if dialog.editing() {
+                "输入匹配内容  Enter 完成  Esc 停止编辑  Ctrl+C 退出"
+            } else {
+                "j/k 字段  Enter 打开列表/编辑  s 应用  Esc 取消"
+            };
+        }
+        match (self.state.page, self.proxy_members_focused) {
+            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  r 刷新  q 退出",
+            (Page::Proxies, false) => "j/k 代理组  Right/Enter 节点  r 刷新  q 退出",
+            (Page::Proxies, true) => "j/k 节点  Enter 应用  l 延迟  Left 返回  q 退出",
+            (Page::Rules, _) => "j/k 规则  a/A 前/后新增  e 编辑  x 删除  J/K 排序  s 保存",
+            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  r 更新  q 退出",
+        }
     }
 
     fn dashboard(&self, frame: &mut Frame, area: Rect) {
@@ -409,25 +755,25 @@ impl App {
                     .unwrap_or_else(|| "未配置".into())
             )),
             ListItem::new(format!(
-                "TUN        {} (t 切换)",
-                if self.config.tun_enabled {
+                "TUN        {} (t 设置)",
+                if self.config.tun.enable {
                     "已启用"
                 } else {
                     "已关闭"
                 }
             )),
             ListItem::new(format!(
-                "DNS        {} ({}, d 切换)",
-                if self.config.dns_enabled {
+                "DNS        {} ({}, d 设置)",
+                if self.config.dns.enable {
                     "已启用"
                 } else {
                     "已关闭"
                 },
-                self.config.dns_mode
+                self.config.dns.enhanced_mode
             )),
             ListItem::new(format!("代理组     {}", self.state.proxies.len())),
             ListItem::new(format!(
-                "规则       {} 条启用 / 共 {} 条",
+                "规则       {} 条保留 / 共 {} 条",
                 self.state.rules.rules.iter().filter(|r| r.enabled).count(),
                 self.state.rules.rules.len()
             )),
@@ -463,11 +809,11 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(27),
-                Constraint::Percentage(20),
-                Constraint::Percentage(25),
-                Constraint::Percentage(15),
-                Constraint::Percentage(13),
+                Constraint::Min(10),
+                Constraint::Length(9),
+                Constraint::Min(10),
+                Constraint::Length(8),
+                Constraint::Length(6),
             ],
         )
         .header(
@@ -482,6 +828,7 @@ impl App {
             &mut TableState::default().with_selected(Some(self.state.selected)),
         );
 
+        let member_index = self.selected_proxy_member_index();
         let members = self
             .state
             .proxies
@@ -491,12 +838,17 @@ impl App {
                     .members
                     .iter()
                     .map(|member| {
-                        let marker = if Some(member.as_str()) == self.selected_proxy_member() {
+                        let marker = if proxy.now.as_deref() == Some(member.as_str()) {
                             "* "
                         } else {
                             "  "
                         };
-                        ListItem::new(format!("{marker}{member}"))
+                        let delay = proxy
+                            .member_delays
+                            .get(member)
+                            .map(crate::models::ProxyDelay::label)
+                            .unwrap_or_else(|| "-".into());
+                        ListItem::new(format!("{marker}{member}  {delay}"))
                     })
                     .collect::<Vec<_>>()
             })
@@ -505,13 +857,16 @@ impl App {
             .state
             .proxies
             .get(self.state.selected)
-            .map(|proxy| format!(" 节点：{} ", proxy.name))
+            .map(|proxy| format!(" 节点：{}（Enter 应用，l 测延迟） ", proxy.name))
             .unwrap_or_else(|| " 节点 ".into());
-        frame.render_widget(
+        let mut member_state = ListState::default();
+        member_state.select((!members.is_empty()).then_some(member_index));
+        frame.render_stateful_widget(
             List::new(members)
                 .block(Block::bordered().title(title))
-                .highlight_style(Style::default().fg(Color::Cyan)),
+                .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White)),
             columns[1],
+            &mut member_state,
         );
     }
 
@@ -571,46 +926,49 @@ impl App {
                 kind: rule.kind.clone(),
                 value: rule.value.clone(),
                 action: rule.action.label().to_string(),
+                extra: rule.extra.clone(),
+                raw: rule.raw.clone(),
             })
             .collect::<Vec<_>>();
         match config::save_rules(path, &rules) {
-            Ok(backup) => match Command::new("systemctl")
-                .args(["reload", "mihomo"])
-                .status()
-            {
-                Ok(status) if status.success() => {
-                    self.config.rules = rules;
-                    self.state.status = format!("Rules saved; backup {}", backup.display());
-                }
-                Ok(status) => self.state.status = format!("Rules saved, reload failed ({status})"),
-                Err(error) => {
-                    self.state.status = format!("Rules saved, reload unavailable: {error}")
-                }
+            Ok(backup) => match self.finalize_config_change(&backup) {
+                Ok(()) => self.state.status = format!("规则已保存；备份 {}", backup.display()),
+                Err(error) => self.state.status = format!("规则未应用：{error}"),
             },
             Err(error) => self.state.status = format!("Rules not saved: {error}"),
         }
     }
 
     fn refresh_provider(&mut self) {
+        if self.provider_refresh_in_flight {
+            self.state.status = "订阅更新正在进行...".into();
+            return;
+        }
         let Some(provider) = self.config.providers.get(self.state.selected) else {
-            self.state.status = "No proxy provider selected".into();
+            self.state.status = "未选择订阅".into();
             return;
         };
         if provider.kind != "http" {
             self.state.status = format!(
-                "{} is a {} provider; update its source file instead",
+                "{} 是 {} provider，没有远程 URL；请更新源文件或改为 HTTP provider",
                 provider.name, provider.kind
             );
             return;
         }
-        let Some(client) = &self.client else {
-            self.state.status = "No Mihomo controller available".into();
+        let Some(client) = self.client.clone() else {
+            self.state.status = "未连接 Mihomo 控制器".into();
             return;
         };
-        match client.refresh_provider(&provider.name) {
-            Ok(()) => self.state.status = format!("{} subscription refreshed", provider.name),
-            Err(error) => self.state.status = format!("Provider update failed: {error}"),
-        }
+        let name = provider.name.clone();
+        self.provider_refresh_in_flight = true;
+        self.state.status = format!("正在更新 {name} 订阅...");
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = client
+                .refresh_provider(&name)
+                .and_then(|()| client.proxies());
+            let _ = sender.send(WorkerResult::ProviderRefreshed { name, result });
+        });
     }
 
     fn rules(&self, frame: &mut Frame, area: Rect) {
@@ -621,7 +979,7 @@ impl App {
             .iter()
             .map(|rule| {
                 Row::new(vec![
-                    if rule.enabled { "on" } else { "off" }.to_string(),
+                    if rule.enabled { "保留" } else { "删除" }.to_string(),
                     rule.kind.clone(),
                     rule.value.clone(),
                     rule.action.label().to_string(),
@@ -631,10 +989,10 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Length(5),
-                Constraint::Length(20),
-                Constraint::Percentage(55),
-                Constraint::Percentage(20),
+                Constraint::Length(6),
+                Constraint::Length(16),
+                Constraint::Min(20),
+                Constraint::Length(18),
             ],
         )
         .header(
@@ -642,7 +1000,7 @@ impl App {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" 规则（空格开关，J/K 排序，s 保存） "));
+        .block(Block::bordered().title(" 规则（Space 标记/撤销删除，J/K 排序，s 保存） "));
         frame.render_stateful_widget(
             table,
             area,
@@ -659,7 +1017,11 @@ impl App {
                 Row::new(vec![
                     provider.name.clone(),
                     provider.kind.clone(),
-                    provider.url.clone().unwrap_or_else(|| "-".into()),
+                    provider
+                        .url
+                        .as_deref()
+                        .map(provider_url_label)
+                        .unwrap_or_else(|| "-".into()),
                     provider.path.clone().unwrap_or_else(|| "-".into()),
                     provider
                         .interval
@@ -671,11 +1033,11 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(15),
-                Constraint::Percentage(12),
-                Constraint::Percentage(32),
-                Constraint::Percentage(28),
-                Constraint::Percentage(13),
+                Constraint::Length(12),
+                Constraint::Length(8),
+                Constraint::Min(18),
+                Constraint::Length(22),
+                Constraint::Length(9),
             ],
         )
         .header(
@@ -709,18 +1071,74 @@ impl App {
             .style(Style::default().fg(Color::White)),
             area,
         );
+        let active_line = if dialog.editing_url {
+            format!("> URL: {}", dialog.url)
+        } else {
+            format!("> 名称: {}", dialog.name)
+        };
+        let cursor_offset = u16::try_from(Line::from(active_line).width()).unwrap_or(u16::MAX);
+        let cursor_x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(cursor_offset)
+            .min(area.right().saturating_sub(2));
+        let cursor_y = area
+            .y
+            .saturating_add(if dialog.editing_url { 2 } else { 1 })
+            .min(area.bottom().saturating_sub(2));
+        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }
 }
 
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let width = width.min(area.width.saturating_sub(2));
-    let height = height.min(area.height.saturating_sub(2));
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
+fn reload_mihomo_service() -> Result<(), String> {
+    let status = Command::new("systemctl")
+        .args(["reload", "mihomo"])
+        .status()
+        .map_err(|error| format!("无法执行 systemctl reload：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl reload 退出状态为 {status}"))
+    }
+}
+
+fn reload_or_rollback<F>(path: &Path, backup: &Path, mut reload: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let reload_error = match reload() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    config::restore_backup(path, backup)
+        .map_err(|error| format!("重载失败（{reload_error}），回滚配置也失败：{error}"))?;
+    match reload() {
+        Ok(()) => Err(format!(
+            "重载失败（{reload_error}）；配置已回滚到修改前版本"
+        )),
+        Err(rollback_error) => Err(format!(
+            "重载失败（{reload_error}）；配置已在磁盘回滚，但恢复版本重载失败（{rollback_error}）"
+        )),
+    }
+}
+
+fn provider_url_label(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "<invalid URL>".into();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid URL>".into();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{}://{host}{port}/...", url.scheme())
 }
 
 fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {
@@ -734,19 +1152,73 @@ fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {
                     &rule.value,
                     match rule.action.as_str() {
                         "DIRECT" => RuleAction::Direct,
-                        "REJECT" | "REJECT-DROP" => RuleAction::Reject,
+                        "REJECT" => RuleAction::Reject,
+                        "REJECT-DROP" => RuleAction::RejectDrop,
                         "PROXY" => RuleAction::Proxy,
                         group => RuleAction::Group(group.into()),
                     },
                 )
+                .with_extra(rule.extra.clone())
+                .with_raw(rule.raw.clone())
             })
             .collect(),
     };
 }
 
+fn apply_proxy_refresh(state: &mut AppState, mut proxies: Vec<crate::models::ProxySummary>) {
+    let existing_delays: std::collections::BTreeMap<_, _> = state
+        .proxies
+        .iter()
+        .flat_map(|proxy| proxy.member_delays.iter())
+        .map(|(name, delay)| (name.clone(), delay.clone()))
+        .collect();
+    for proxy in &mut proxies {
+        for member in &proxy.members {
+            if let Some(delay) = existing_delays.get(member) {
+                proxy
+                    .member_delays
+                    .entry(member.clone())
+                    .or_insert_with(|| delay.clone());
+            }
+        }
+    }
+    let report_connection = state.status == "正在连接 Mihomo..."
+        || state.status == "正在刷新代理列表..."
+        || state.status.starts_with("API 错误：");
+    state.proxies = proxies;
+    if report_connection {
+        state.status = "已连接，代理列表已刷新".into();
+    }
+}
+
+fn apply_delay_result(state: &mut AppState, target: &str, delay: ProxyDelay) {
+    for proxy in &mut state.proxies {
+        if proxy.members.iter().any(|member| member == target) {
+            proxy
+                .member_delays
+                .insert(target.to_string(), delay.clone());
+        }
+        if proxy.name == target {
+            proxy.delay_ms = match delay {
+                ProxyDelay::Measured(value) => Some(value),
+                ProxyDelay::Timeout | ProxyDelay::Failed => None,
+            };
+        }
+    }
+    state.status = format!("{target}: {}", delay.label());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use std::{
+        fs,
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        thread,
+        time::SystemTime,
+    };
 
     #[test]
     fn proxy_member_selection_starts_at_the_current_member() {
@@ -764,5 +1236,394 @@ mod tests {
 
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.selected_proxy_member(), Some("Singapore-02"));
+    }
+
+    #[test]
+    fn provider_selection_enters_a_matching_proxy_group() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.config.providers = vec![crate::config::Provider {
+            name: "Proxy".into(),
+            kind: "http".into(),
+            url: None,
+            path: None,
+            interval: None,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.state.page, Page::Proxies);
+        assert_eq!(app.state.selected, 0);
+        assert!(app.proxy_members_focused);
+    }
+
+    #[test]
+    fn provider_selection_uses_the_group_that_references_the_provider() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.config.providers = vec![crate::config::Provider {
+            name: "sbyun".into(),
+            kind: "http".into(),
+            url: None,
+            path: None,
+            interval: None,
+        }];
+        app.config
+            .provider_groups
+            .insert("sbyun".into(), vec!["赛博云".into()]);
+        app.state.proxies = AppState::demo().proxies;
+        app.state.proxies[0].name = "GLOBAL".into();
+        app.state.proxies[1].name = "赛博云".into();
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.state.page, Page::Proxies);
+        assert_eq!(app.state.selected, 1);
+        assert!(app.proxy_members_focused);
+    }
+
+    #[test]
+    fn demo_mode_keeps_demo_rules_without_a_config_file() {
+        let app = App::new(None, None, None);
+
+        assert!(!app.state.rules.rules.is_empty());
+    }
+
+    #[test]
+    fn proxy_refresh_preserves_measured_member_delays_and_status() {
+        let mut state = AppState::demo();
+        state.status = "Tokyo-01: 128 ms".into();
+        state.proxies[0]
+            .member_delays
+            .insert("Tokyo-01".into(), crate::models::ProxyDelay::Measured(128));
+        let mut refreshed = state.proxies.clone();
+        for proxy in &mut refreshed {
+            proxy.member_delays.clear();
+        }
+
+        apply_proxy_refresh(&mut state, refreshed);
+
+        assert_eq!(
+            state.proxies[0].member_delays.get("Tokyo-01"),
+            Some(&crate::models::ProxyDelay::Measured(128))
+        );
+        assert_eq!(state.status, "Tokyo-01: 128 ms");
+    }
+
+    #[test]
+    fn provider_urls_hide_subscription_credentials() {
+        assert_eq!(
+            provider_url_label("https://subscriptions.example.com/user/private-token?format=yaml"),
+            "https://subscriptions.example.com/..."
+        );
+        assert_eq!(provider_url_label("not a url"), "<invalid URL>");
+    }
+
+    #[test]
+    fn reload_failure_restores_the_previous_config() {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-rollback-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        let backup = directory.join("config.yaml.bak");
+        fs::write(&path, "new config").unwrap();
+        fs::write(&backup, "old config").unwrap();
+        let mut attempts = 0;
+
+        let error = reload_or_rollback(&path, &backup, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err("reload rejected".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old config");
+        assert_eq!(attempts, 2);
+        assert!(error.contains("回滚"));
+        fs::remove_file(path).unwrap();
+        fs::remove_file(backup).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn moving_a_rule_keeps_the_moved_rule_selected() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        app.state.rules = AppState::demo().rules;
+        app.state.selected = 0;
+        let moved_value = app.state.rules.rules[0].value.clone();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT));
+
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.rules.rules[1].value, moved_value);
+    }
+
+    #[test]
+    fn control_c_quits_even_when_the_add_provider_dialog_is_open() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let should_quit = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(should_quit);
+    }
+
+    #[test]
+    fn add_provider_dialog_places_the_cursor_at_the_active_field() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('机'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('场'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(18, 8));
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(13, 9));
+    }
+
+    #[test]
+    fn dashboard_t_opens_tun_settings_with_current_values() {
+        let mut app = App::new(None, None, None);
+        app.config.tun.stack = "system".into();
+        app.config.tun.mtu = Some(9000);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("TUN 高级设置"));
+        assert!(screen.contains("system"));
+        assert!(screen.contains("9000"));
+    }
+
+    #[test]
+    fn tun_settings_show_a_cursor_while_editing_the_device() {
+        let mut app = App::new(None, None, None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(25, 8));
+    }
+
+    #[test]
+    fn dashboard_d_opens_dns_settings_with_current_values() {
+        let mut app = App::new(None, None, None);
+        app.config.dns.enhanced_mode = "fake-ip".into();
+        app.config.dns.fake_ip_range = Some("198.18.0.1/16".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("DNS 高级设置"));
+        assert!(screen.contains("fake-ip"));
+        assert!(screen.contains("198.18.0.1/16"));
+    }
+
+    #[test]
+    fn rule_editor_adds_rules_to_the_requested_end_of_the_list() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for character in "front.example".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert_eq!(app.state.rules.rules[0].value, "front.example");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for character in "back.example".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert_eq!(app.state.rules.rules.last().unwrap().value, "back.example");
+    }
+
+    #[test]
+    fn editing_a_rule_shows_the_cursor_at_the_match_value() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("编辑自定义规则"));
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(35, 9));
+    }
+
+    #[test]
+    fn rule_editor_offers_configured_proxy_groups_as_policies() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        app.config.proxy_groups = vec!["赛博云".into()];
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(terminal.backend().to_string().contains("赛博云"));
+    }
+
+    #[test]
+    fn rule_kind_enter_opens_a_selectable_list_without_changing_the_value() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("选择规则类型"));
+        assert!(screen.contains("DOMAIN-SUFFIX"));
+        assert!(screen.contains("DOMAIN-KEYWORD"));
+    }
+
+    #[test]
+    fn rule_kind_list_uses_space_to_confirm_and_advances_to_match_input() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("DOMAIN-KEYWORD"));
+        assert!(screen.contains('x'));
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(26, 9));
+    }
+
+    #[test]
+    fn rule_policy_enter_opens_a_list_and_space_confirms_the_selection() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Rules;
+        app.config.proxy_groups = vec!["赛博云".into()];
+        app.state.proxies.clear();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let open_screen = terminal.backend().to_string();
+        assert!(open_screen.contains("选择代理策略"));
+        assert!(open_screen.contains("赛博云"));
+        assert!(open_screen.contains("DIRECT"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let confirmed_screen = terminal.backend().to_string();
+        assert!(!confirmed_screen.contains("选择代理策略"));
+        assert!(confirmed_screen.contains("< DIRECT >"));
+    }
+
+    #[test]
+    fn refresh_returns_before_a_slow_api_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            assert!(request_line.starts_with("GET /proxies "));
+            thread::sleep(Duration::from_millis(300));
+            let body = r#"{"proxies":{"Main":{"type":"Selector","all":["Node"],"now":"Node"},"Node":{"type":"Shadowsocks","history":[]}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut app = App::new(Some(format!("http://{address}")), None, None);
+
+        let started = Instant::now();
+        app.refresh();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        for _ in 0..50 {
+            app.process_worker_results();
+            if !app.refresh_in_flight {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "refresh blocked the UI for {elapsed:?}"
+        );
+        assert!(!app.refresh_in_flight);
+        assert_eq!(app.state.proxies[0].name, "Main");
+    }
+
+    #[test]
+    fn context_shortcuts_fit_an_eighty_column_terminal() {
+        let mut app = App::new(None, None, None);
+        for page in [Page::Dashboard, Page::Proxies, Page::Rules, Page::Config] {
+            app.state.page = page;
+            app.proxy_members_focused = false;
+            assert!(Line::from(app.shortcut_help()).width() <= 78);
+        }
+        app.state.page = Page::Proxies;
+        app.proxy_members_focused = true;
+        assert!(Line::from(app.shortcut_help()).width() <= 78);
     }
 }
