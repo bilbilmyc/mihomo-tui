@@ -9,7 +9,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -23,6 +22,7 @@ pub struct App {
     selected_proxy_member_index: usize,
     config: ConfigSnapshot,
     config_path: Option<PathBuf>,
+    config_reload: ConfigReload,
     add_provider: Option<AddProviderDialog>,
     settings_dialog: Option<SettingsDialog>,
     rule_dialog: Option<RuleDialog>,
@@ -32,6 +32,12 @@ pub struct App {
     provider_refresh_in_flight: bool,
     delay_probe_in_flight: bool,
     proxy_selection_in_flight: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigReload {
+    None,
+    LocalSystemd,
 }
 
 struct AddProviderDialog {
@@ -58,10 +64,20 @@ enum WorkerResult {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(
         controller: Option<String>,
         secret: Option<String>,
         config_path: Option<PathBuf>,
+    ) -> Self {
+        Self::with_config_reload(controller, secret, config_path, ConfigReload::None)
+    }
+
+    pub fn with_config_reload(
+        controller: Option<String>,
+        secret: Option<String>,
+        config_path: Option<PathBuf>,
+        config_reload: ConfigReload,
     ) -> Self {
         let mut state = AppState::demo();
         let config = if let Some(path) = config_path.as_deref() {
@@ -94,6 +110,7 @@ impl App {
             selected_proxy_member_index: 0,
             config,
             config_path,
+            config_reload,
             add_provider: None,
             settings_dialog: None,
             rule_dialog: None,
@@ -558,14 +575,18 @@ impl App {
             .config_path
             .clone()
             .ok_or_else(|| "未发现 Mihomo 配置路径".to_string())?;
-        let reload_result = reload_or_rollback(&path, backup, reload_mihomo_service);
+        let reload_result =
+            apply_config_reload(self.config_reload, &path, backup, reload_mihomo_service);
         let state_result = config::load(&path).map(|snapshot| {
             apply_config(&mut self.state, &snapshot);
             self.config = snapshot;
         });
         match (reload_result, state_result) {
             (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) => Err(format!("核心已重载，但重新读取配置失败：{error}")),
+            (Ok(()), Err(error)) if self.config_reload == ConfigReload::LocalSystemd => {
+                Err(format!("核心已重载，但重新读取配置失败：{error}"))
+            }
+            (Ok(()), Err(error)) => Err(format!("配置已保存，但重新读取失败：{error}")),
             (Err(error), Ok(())) => Err(error),
             (Err(reload_error), Err(read_error)) => Err(format!(
                 "{reload_error}；重新读取恢复后的配置也失败：{read_error}"
@@ -1091,14 +1112,21 @@ impl App {
 }
 
 fn reload_mihomo_service() -> Result<(), String> {
-    let status = Command::new("systemctl")
-        .args(["reload", "mihomo"])
-        .status()
-        .map_err(|error| format!("无法执行 systemctl reload：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("systemctl reload 退出状态为 {status}"))
+    crate::runtime::reload_service()
+}
+
+fn apply_config_reload<F>(
+    policy: ConfigReload,
+    path: &Path,
+    backup: &Path,
+    reload: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    match policy {
+        ConfigReload::None => Ok(()),
+        ConfigReload::LocalSystemd => reload_or_rollback(path, backup, reload),
     }
 }
 
@@ -1352,6 +1380,23 @@ mod tests {
         fs::remove_file(path).unwrap();
         fs::remove_file(backup).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn external_config_changes_never_reload_the_local_service() {
+        let mut reloads = 0;
+        apply_config_reload(
+            ConfigReload::None,
+            Path::new("/unused/config.yaml"),
+            Path::new("/unused/config.yaml.bak"),
+            || {
+                reloads += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(reloads, 0);
     }
 
     #[test]

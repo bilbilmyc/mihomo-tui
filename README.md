@@ -7,7 +7,8 @@ The project deliberately keeps Mihomo as the proxy core and focuses on the Linux
 ## Current MVP
 
 - Ratatui dashboard with Status, Proxies, Rules, and Config pages
-- Demo mode when no controller is supplied
+- Automatic Mihomo installation and service startup on supported Linux hosts
+- Demo mode with `--no-auto-install` when no controller or local installation is available
 - Mihomo `/proxies` API discovery and refresh
 - Proxy-group selection through the controller API
 - Reads and edits the active Mihomo YAML for rules, providers, TUN, DNS, port, and mode
@@ -19,8 +20,29 @@ The project deliberately keeps Mihomo as the proxy core and focuses on the Linux
 
 ## Run
 
+With no explicit controller or config, the program manages the system Mihomo installation. Build it,
+then run the local-management mode as root:
+
 ```bash
-cargo run
+cargo build --release
+sudo ./target/release/mihomo-tui
+```
+
+On a clean Debian/Ubuntu host it downloads the pinned official `v1.19.29` package, verifies its
+SHA-256 and deb metadata, installs it through `dpkg`, creates a loopback-only Controller
+configuration, and enables `mihomo.service`. Downloaded artifacts stay root-owned from creation
+through installation.
+
+Automatic installation currently supports `x86_64` and `aarch64` Debian/Ubuntu systems running
+systemd. It never upgrades an existing installation and refuses to overwrite a partial installation
+where only some of the binary, service, or system config exist. If a first installation is
+interrupted after `dpkg`, the next run can safely resume only when the config is still the exact
+official default.
+
+Skip downloading and enter Demo mode on a clean host:
+
+```bash
+cargo run -- --no-auto-install
 ```
 
 Connect to a running Mihomo controller:
@@ -38,6 +60,11 @@ MIHOMO_CONTROLLER=http://127.0.0.1:9093 \
 MIHOMO_SECRET=secret \
 cargo run
 ```
+
+An explicit `--controller`, `MIHOMO_CONTROLLER`, `--config`, or `MIHOMO_CONFIG` disables startup-time
+local installation and service start. A config discovered under `~/.config/mihomo` is also treated as
+user-managed and does not trigger system service changes. Config edits in these external modes are
+saved locally but do not reload `mihomo.service` on the TUI host.
 
 Keys:
 

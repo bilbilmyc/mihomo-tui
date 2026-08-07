@@ -365,7 +365,6 @@ use std::{
     fs::{self, OpenOptions, Permissions},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -667,17 +666,11 @@ fn write_validated(path: &Path, document: &Value) -> Result<PathBuf, String> {
     let stamp = unique_stamp()?;
     let candidate = parent.join(format!(".mihomo-tui-{}-{stamp}.yaml", std::process::id()));
     write_new_file(&candidate, serialized.as_bytes(), original_permissions)?;
-    let validation = match Command::new("mihomo")
-        .args(["-t", "-f"])
-        .arg(&candidate)
-        .args(["-d"])
-        .arg(parent)
-        .output()
-    {
+    let validation = match crate::runtime::validate_config(&candidate, parent) {
         Ok(validation) => validation,
         Err(error) => {
             let _ = fs::remove_file(&candidate);
-            return Err(format!("could not run mihomo validation: {error}"));
+            return Err(error);
         }
     };
     if !validation.status.success() {
