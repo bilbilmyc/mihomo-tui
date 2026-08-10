@@ -6,7 +6,11 @@ The project owns one native Mihomo configuration file. Subscriptions, rules, TUN
 edited while Mihomo is stopped, missing, or unreachable, and the managed Mihomo service reads that
 same file directly.
 
-## Current MVP
+The Debian bundle is a standalone application distribution: it contains `mihomo-tui`, a reviewed
+official Mihomo binary, the service unit, license/source notices, and the versioned managed-core
+layout. Mihomo remains a separate process rather than being linked into the Rust program.
+
+## Capabilities
 
 - Ratatui dashboard with Status, Proxies, Rules, and Config pages
 - Single native configuration at `/etc/mihomo-tui/config.yaml`
@@ -14,6 +18,9 @@ same file directly.
 - Offline subscription, rule, TUN, and DNS editing without a Mihomo binary
 - Explicit validation, core reload, and subscription verification
 - Optional Mihomo installation during explicit apply on supported Linux hosts
+- Read-only `mihomo-tui core status` inventory and explicit transactional `core upgrade`
+- Versioned managed cores with atomic activation, API health checks, and automatic rollback
+- Native amd64 and arm64 Debian bundles with SHA-256 checksums
 - Mihomo `/proxies` API discovery and refresh
 - Proxy-group selection through the controller API
 - Reads and edits the single native YAML for rules, providers, TUN, DNS, port, and mode
@@ -24,7 +31,49 @@ same file directly.
 - A managed systemd drop-in that points Mihomo directly at `/etc/mihomo-tui`
 - ASCII-compatible UI for SSH terminals without Nerd Fonts
 
-## Run
+## Standalone Debian Install
+
+Build and verify a native package on an amd64 or arm64 Debian/Ubuntu host:
+
+```bash
+./scripts/build-deb.sh --architecture "$(dpkg --print-architecture)"
+./scripts/test-deb-package.sh dist/*.deb
+```
+
+The builder downloads only the pinned official release from `managed-core.json`, limits artifact
+sizes, verifies SHA-256 and Deb metadata, builds a fresh locked Rust binary, derives shared-library
+dependencies, and emits a `.deb` plus `.sha256`.
+
+Install the bundle with dependency resolution:
+
+```bash
+sudo apt install ./dist/mihomo-tui_*.deb
+mihomo-tui core status
+sudo mihomo-tui
+```
+
+Installation does not enable or start `mihomo.service`. On a fresh install, the packaged core is
+registered under `/usr/lib/mihomo-tui/cores/<version>` and selected by `current`. The first TUI run
+creates or imports `/etc/mihomo-tui/config.yaml`; pressing `p` explicitly validates the config and
+starts or reloads the managed service.
+
+For a paired package/core update, install the reviewed new Deb first, inspect both versions, then
+activate explicitly:
+
+```bash
+sudo apt install ./mihomo-tui_NEW_VERSION.deb
+mihomo-tui core status
+sudo mihomo-tui core upgrade
+```
+
+Package upgrade registers the new core but preserves the active core and rollback binary. The
+explicit upgrade validates the already installed candidate, atomically switches `current`, restarts
+Mihomo, checks `/version` and `/proxies`, and restores the previous core if activation fails.
+
+See [`docs/debian-package.md`](docs/debian-package.md) for packaging, removal, publication, and
+license gates.
+
+## Run From Source
 
 Build the program, then run it as root when using the default system paths:
 
@@ -53,10 +102,10 @@ verify HTTP subscriptions. Neither editing nor applying writes `/etc/mihomo/conf
 Early mihomo-tui builds used a `kind/backend/profile` wrapper. Startup automatically migrates that
 wrapper to native Mihomo YAML and keeps a private backup.
 
-On a clean Debian/Ubuntu host, the first explicit apply can download the pinned official `v1.19.29`
-package, verify its SHA-256 and deb metadata, install it through `dpkg`, configure the runtime
-service, and then load the single config. Downloaded artifacts stay root-owned from creation through
-installation.
+When running only the Rust binary from source on a clean Debian/Ubuntu host, the first explicit apply
+can download the pinned official `v1.19.29` package, verify its SHA-256 and Deb metadata, install it
+through `dpkg`, configure the runtime service, and then load the single config. Downloaded artifacts
+stay root-owned from creation through installation.
 
 Automatic installation currently supports `x86_64` and `aarch64` Debian/Ubuntu systems running
 systemd. It never upgrades an existing installation and refuses to overwrite a partial installation
@@ -66,19 +115,30 @@ where only the binary or service exists.
 
 Mihomo remains a separate process, but its tested release contract is part of the product. The
 embedded [`managed-core.json`](managed-core.json) manifest is the only source of package names,
-architectures, versions, and SHA-256 hashes used by the installer. The current contract recommends
-`v1.19.29` and accepts installed versions from `v1.19.28` up to, but not including, `v1.20.0` for
-locally managed apply.
+architectures, versions, license hash, and SHA-256 hashes used by the installer and bundle builder.
+The current contract recommends `v1.19.29` and accepts installed versions from `v1.19.28` up to, but
+not including, `v1.20.0` for locally managed apply.
 
 Pressing `p` checks an existing local core against that tested range before validating or reloading
 the configuration. A too-old or untested-newer core is left untouched and produces an actionable
 error. Existing cores are never silently upgraded, and normal startup never checks for or installs a
 new upstream release.
 
-Upstream versions enter `mihomo-tui` through a reviewed manifest update, architecture builds, config
-validation, and Controller API integration tests. Explicit staged upgrade and automatic rollback are
-planned before any in-app upgrade action is enabled. The complete contract and phased delivery plan
-are documented in [`docs/managed-core.md`](docs/managed-core.md).
+Upstream versions enter `mihomo-tui` through an automated proposal branch and reviewed pull request.
+The proposal fails closed outside the compatibility range and must pass Rust tests, Clippy, native
+amd64/arm64 package builds, archive inspection, disposable-runner installation, and transaction
+rollback tests. Normal startup and `p` never run `core upgrade`.
+
+Inspect or explicitly upgrade the managed core:
+
+```bash
+mihomo-tui core status
+sudo mihomo-tui core upgrade
+```
+
+The complete contract is documented in [`docs/managed-core.md`](docs/managed-core.md), and the
+architectural rationale is recorded in
+[`ADR-0001`](docs/decisions/0001-bundle-mihomo-as-a-separate-process.md).
 
 Prevent downloads during explicit apply:
 
