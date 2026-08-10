@@ -125,6 +125,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn live(controller: impl Into<String>) -> Self {
+        Self {
+            page: Page::Dashboard,
+            proxies: Vec::new(),
+            rules: RuleSet::default(),
+            selected: 0,
+            status: "等待连接 Mihomo...".into(),
+            controller: controller.into(),
+        }
+    }
+
     pub fn demo() -> Self {
         Self {
             page: Page::Dashboard,
@@ -191,5 +202,14 @@ mod tests {
     fn proxy_delay_labels_distinguish_timeouts_from_missing_data() {
         assert_eq!(ProxyDelay::Measured(86).label(), "86 ms");
         assert_eq!(ProxyDelay::Timeout.label(), "timeout");
+    }
+
+    #[test]
+    fn live_state_has_no_example_data() {
+        let state = AppState::live("http://127.0.0.1:9090");
+
+        assert!(state.proxies.is_empty());
+        assert!(state.rules.rules.is_empty());
+        assert_eq!(state.controller, "http://127.0.0.1:9090");
     }
 }

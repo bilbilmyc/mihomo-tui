@@ -79,7 +79,12 @@ impl App {
         config_path: Option<PathBuf>,
         config_reload: ConfigReload,
     ) -> Self {
-        let mut state = AppState::demo();
+        let demo_mode = controller.is_none() && config_path.is_none();
+        let mut state = if demo_mode {
+            AppState::demo()
+        } else {
+            AppState::live(controller.as_deref().unwrap_or("未连接"))
+        };
         let config = if let Some(path) = config_path.as_deref() {
             match config::load(path) {
                 Ok(snapshot) => {
@@ -1338,6 +1343,15 @@ mod tests {
         let app = App::new(None, None, None);
 
         assert!(!app.state.rules.rules.is_empty());
+    }
+
+    #[test]
+    fn configured_controller_never_shows_demo_proxies_or_rules() {
+        let app = App::new(Some("http://127.0.0.1:9090".into()), None, None);
+
+        assert!(app.state.proxies.is_empty());
+        assert!(app.state.rules.rules.is_empty());
+        assert_eq!(app.state.controller, "http://127.0.0.1:9090");
     }
 
     #[test]
