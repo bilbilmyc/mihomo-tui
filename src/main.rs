@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod core;
+mod core_manager;
 mod core_package;
 mod dialogs;
 mod discovery;
@@ -11,7 +12,7 @@ mod system;
 mod workspace;
 
 use app::{App, ConfigReload};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -26,6 +27,8 @@ use std::{fmt::Display, io::stdout, path::PathBuf, process::ExitCode};
     about = "A terminal control center for Mihomo"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Mihomo external controller URL, for example http://127.0.0.1:9093
     #[arg(long, env = "MIHOMO_CONTROLLER")]
     controller: Option<String>,
@@ -43,6 +46,21 @@ struct Args {
     no_auto_install: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Inspect or explicitly upgrade the managed Mihomo core.
+    Core {
+        #[command(subcommand)]
+        command: CoreCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CoreCommand {
+    /// Report installed, active, recommended, and compatible core versions.
+    Status,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -55,6 +73,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if let Some(command) = args.command {
+        return run_command(command);
+    }
     let controller_was_explicit = args.controller.is_some();
     let config_was_explicit = args.config.is_some();
     let workspace_was_explicit = args.workspace.is_some();
@@ -108,6 +129,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Command::Core {
+            command: CoreCommand::Status,
+        } => {
+            println!("{}", core_manager::status().map_err(std::io::Error::other)?);
+            Ok(())
+        }
+    }
+}
+
 fn render_fatal_error(error: impl Display) -> String {
     format!("mihomo-tui: {error}")
 }
@@ -153,5 +185,17 @@ mod tests {
         assert!(output.contains("sudo mihomo-tui"));
         assert!(!output.contains("--no-auto-install"));
         assert!(!output.contains("Custom"));
+    }
+
+    #[test]
+    fn core_status_is_an_explicit_cli_subcommand() {
+        let args = Args::try_parse_from(["mihomo-tui", "core", "status"]);
+
+        assert!(matches!(
+            args.unwrap().command,
+            Some(Command::Core {
+                command: CoreCommand::Status
+            })
+        ));
     }
 }

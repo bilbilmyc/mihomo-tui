@@ -21,6 +21,19 @@ pub fn trusted_root_file(_path: &Path) -> bool {
 }
 
 #[cfg(unix)]
+pub fn trusted_root_directory(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+pub fn trusted_root_directory(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub fn effective_root() -> bool {
     fs::metadata("/proc/self")
         .map(|metadata| metadata.uid() == 0)
@@ -90,5 +103,28 @@ mod tests {
 
         assert!(!trusted_root_file(&path));
         fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_owned_directories_must_not_be_group_or_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = Path::new("/tmp").join(format!(
+            "mihomo-tui-directory-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted_root_directory(&path));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!trusted_root_directory(&path));
+        fs::remove_dir(path).unwrap();
     }
 }

@@ -163,6 +163,14 @@ impl CoreRelease {
         self.recommended
     }
 
+    pub fn minimum_supported(&self) -> CoreVersion {
+        self.minimum_supported
+    }
+
+    pub fn maximum_exclusive(&self) -> CoreVersion {
+        self.maximum_exclusive
+    }
+
     pub fn compatibility(&self, version: CoreVersion) -> Compatibility {
         if version < self.minimum_supported {
             Compatibility::TooOld
