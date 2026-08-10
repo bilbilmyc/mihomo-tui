@@ -34,11 +34,17 @@ validate_tag() {
   }
 }
 
-for tool in jq dpkg dpkg-deb curl sha256sum mktemp; do
+for tool in jq dpkg dpkg-deb curl sha256sum mktemp stat; do
   require_tool "$tool"
 done
 
-jq -e '.schema == 1 and .repository == "MetaCubeX/mihomo"' "$manifest" >/dev/null || {
+jq -e '
+  .schema == 1
+  and .repository == "MetaCubeX/mihomo"
+  and .license.spdx == "GPL-3.0"
+  and .license.asset == "LICENSE"
+  and (.license.sha256 | test("^[0-9a-f]{64}$"))
+' "$manifest" >/dev/null || {
   echo "managed-core.json has an unsupported schema or repository" >&2
   exit 1
 }
@@ -61,9 +67,14 @@ trap 'rm -rf -- "$temp_dir"' EXIT
 release_json="$temp_dir/release.json"
 curl --fail --silent --show-error --location \
   --retry 3 --retry-all-errors \
+  --max-filesize 4194304 \
   --proto '=https' --proto-redir '=https' \
   --user-agent "mihomo-tui-managed-core-sync" \
   --output "$release_json" "$api_url"
+[[ $(stat -c '%s' "$release_json") -le 4194304 ]] || {
+  echo "GitHub release response exceeds the 4 MiB limit" >&2
+  exit 1
+}
 
 jq -e '.draft == false and .prerelease == false' "$release_json" >/dev/null || {
   echo "GitHub latest release is a draft or prerelease" >&2
@@ -72,6 +83,20 @@ jq -e '.draft == false and .prerelease == false' "$release_json" >/dev/null || {
 tag=$(jq -er '.tag_name' "$release_json")
 validate_tag "$tag"
 deb_version=${tag#v}
+license_url="https://raw.githubusercontent.com/$repository/$tag/LICENSE"
+license_file="$temp_dir/LICENSE"
+curl --fail --silent --show-error --location \
+  --retry 3 --retry-all-errors \
+  --max-filesize 1048576 \
+  --proto '=https' --proto-redir '=https' \
+  --user-agent "mihomo-tui-managed-core-sync" \
+  --output "$license_file" "$license_url"
+[[ $(stat -c '%s' "$license_file") -le 1048576 ]] || {
+  echo "Mihomo license exceeds the 1 MiB limit" >&2
+  exit 1
+}
+license_sha256=$(sha256sum "$license_file")
+license_sha256=${license_sha256%% *}
 
 asset_url() {
   local name=$1
@@ -96,9 +121,14 @@ fetch_package() {
   }
   curl --fail --silent --show-error --location \
     --retry 3 --retry-all-errors \
+    --max-filesize 134217728 \
     --proto '=https' --proto-redir '=https' \
     --user-agent "mihomo-tui-managed-core-sync" \
     --output "$output" "$url"
+  [[ $(stat -c '%s' "$output") -le 134217728 ]] || {
+    echo "$asset exceeds the 128 MiB limit" >&2
+    return 1
+  }
 
   local package_name package_version package_architecture
   package_name=$(dpkg-deb --field "$output" Package)
@@ -137,9 +167,10 @@ arm64_package=$(fetch_package aarch64 arm64 "$arm64_asset")
 
 jq \
   --arg recommended "$tag" \
+  --arg license_sha256 "$license_sha256" \
   --argjson amd64 "$amd64_package" \
   --argjson arm64 "$arm64_package" \
-  '.recommended = $recommended | .packages = [$amd64, $arm64]' \
+  '.recommended = $recommended | .license.sha256 = $license_sha256 | .packages = [$amd64, $arm64]' \
   "$manifest" >"$temp_dir/managed-core.json"
 jq -e . "$temp_dir/managed-core.json" >/dev/null
 mv "$temp_dir/managed-core.json" "$manifest"

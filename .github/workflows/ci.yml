@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test managed-core sync policy
         run: ./scripts/test-sync-managed-core.sh
+      - name: Test Debian bundle policy
+        run: ./scripts/test-build-deb-policy.sh
 
   security-audit:
     runs-on: ubuntu-latest
@@ -36,15 +38,17 @@ jobs:
         with:
           token: ${{ github.token }}
 
-  release-build:
+  release-package:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
             architecture: x86_64
+            debian: amd64
           - runner: ubuntu-24.04-arm
             architecture: aarch64
+            debian: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +57,14 @@ jobs:
         run: 'rustc -vV | grep "host: ${{ matrix.architecture }}-unknown-linux-gnu"'
       - name: Build release binary
         run: cargo build --release --locked
+      - name: Build Debian bundle
+        run: ./scripts/build-deb.sh --architecture "${{ matrix.debian }}"
+      - name: Verify Debian bundle
+        run: ./scripts/test-deb-package.sh dist/*.deb
+      - name: Install bundle on disposable runner
+        run: sudo ./scripts/test-install-deb.sh dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-tui-${{ matrix.architecture }}
+          path: dist/*
+          if-no-files-found: error

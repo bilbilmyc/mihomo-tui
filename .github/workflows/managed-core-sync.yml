@@ -58,8 +58,10 @@ jobs:
         include:
           - runner: ubuntu-latest
             architecture: x86_64
+            debian: amd64
           - runner: ubuntu-24.04-arm
             architecture: aarch64
+            debian: arm64
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -80,6 +82,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Build release binary
         run: cargo build --release --locked
+      - name: Build Debian bundle
+        run: ./scripts/build-deb.sh --architecture "${{ matrix.debian }}"
+      - name: Verify Debian bundle
+        run: ./scripts/test-deb-package.sh dist/*.deb
+      - name: Install bundle on disposable runner
+        run: sudo ./scripts/test-install-deb.sh dist/*.deb
 
   open-pr:
     needs: [prepare, verify]
@@ -102,5 +110,5 @@ jobs:
               --base master \
               --head "$BRANCH" \
               --title "chore: propose Mihomo ${VERSION}" \
-              --body "Updates the pinned official Mihomo packages and hashes inside the existing reviewed compatibility range. Both native architectures passed tests, Clippy, and release builds. A human must approve before merge or release."
+              --body "Updates the pinned official Mihomo packages, license, and hashes inside the existing reviewed compatibility range. Both native architectures passed tests, Clippy, package verification, and disposable-runner installation. A human must approve before merge or release."
           fi

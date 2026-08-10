@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for tool in awk cargo chmod curl dpkg dpkg-deb dpkg-shlibdeps du file install jq ln mkdir mktemp realpath rm sed sha256sum; do
+for tool in awk cargo chmod curl dpkg dpkg-deb dpkg-shlibdeps du file install jq ln mkdir mktemp realpath rm sed sha256sum stat; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required tool is missing: $tool" >&2
     exit 1
@@ -72,6 +72,12 @@ core_deb_version=$(jq -er '.deb_version' <<<"$package_json")
 license_asset=$(jq -er '.license.asset' "$manifest")
 license_sha256=$(jq -er '.license.sha256' "$manifest")
 license_spdx=$(jq -er '.license.spdx' "$manifest")
+[[ $core_tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+[[ $core_asset == "mihomo-linux-$architecture-v1-$core_tag.deb" ]]
+[[ $core_deb_version == "${core_tag#v}" ]]
+[[ $core_sha256 =~ ^[0-9a-f]{64}$ ]]
+[[ $license_asset == LICENSE && $license_spdx == GPL-3.0 ]]
+[[ $license_sha256 =~ ^[0-9a-f]{64}$ ]]
 
 temp_dir=$(mktemp -d)
 trap 'rm -rf -- "$temp_dir"' EXIT
@@ -81,12 +87,17 @@ if [[ -z $core_deb ]]; then
   core_url="https://github.com/MetaCubeX/mihomo/releases/download/$core_tag/$core_asset"
   curl --fail --silent --show-error --location \
     --retry 3 --retry-all-errors \
+    --max-filesize 134217728 \
     --proto '=https' --proto-redir '=https' \
     --user-agent "mihomo-tui-deb-builder" \
     --output "$core_deb" "$core_url"
 fi
 [[ -f $core_deb && ! -L $core_deb ]] || {
   echo "core deb is not a regular file: $core_deb" >&2
+  exit 1
+}
+[[ $(stat -c '%s' "$core_deb") -le 134217728 ]] || {
+  echo "core deb exceeds the 128 MiB limit" >&2
   exit 1
 }
 actual_core_sha256=$(sha256sum "$core_deb")
@@ -150,9 +161,14 @@ license_file="$temp_dir/$license_asset"
 license_url="https://raw.githubusercontent.com/MetaCubeX/mihomo/$core_tag/$license_asset"
 curl --fail --silent --show-error --location \
   --retry 3 --retry-all-errors \
+  --max-filesize 1048576 \
   --proto '=https' --proto-redir '=https' \
   --user-agent "mihomo-tui-deb-builder" \
   --output "$license_file" "$license_url"
+[[ $(stat -c '%s' "$license_file") -le 1048576 ]] || {
+  echo "Mihomo license exceeds the 1 MiB limit" >&2
+  exit 1
+}
 actual_license_sha256=$(sha256sum "$license_file")
 actual_license_sha256=${actual_license_sha256%% *}
 [[ $actual_license_sha256 == "$license_sha256" ]] || {
