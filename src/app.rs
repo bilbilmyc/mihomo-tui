@@ -29,7 +29,7 @@ pub struct App {
     worker_tx: Sender<WorkerResult>,
     worker_rx: Receiver<WorkerResult>,
     refresh_in_flight: bool,
-    provider_refresh_in_flight: bool,
+    provider_refresh_in_flight: usize,
     delay_probe_in_flight: bool,
     proxy_selection_in_flight: bool,
 }
@@ -204,6 +204,19 @@ impl AddProviderDialog {
     }
 }
 
+enum ProviderRefreshContext {
+    Manual,
+    AfterSave {
+        action: &'static str,
+        backup: PathBuf,
+    },
+}
+
+struct ProviderRefreshData {
+    node_count: usize,
+    proxies: Result<Vec<ProxySummary>, String>,
+}
+
 enum WorkerResult {
     Proxies(Result<Vec<ProxySummary>, String>),
     ProxySelected {
@@ -217,7 +230,8 @@ enum WorkerResult {
     },
     ProviderRefreshed {
         name: String,
-        result: Result<Vec<ProxySummary>, String>,
+        context: ProviderRefreshContext,
+        result: Result<ProviderRefreshData, String>,
     },
 }
 
@@ -280,7 +294,7 @@ impl App {
             worker_tx,
             worker_rx,
             refresh_in_flight: false,
-            provider_refresh_in_flight: false,
+            provider_refresh_in_flight: 0,
             delay_probe_in_flight: false,
             proxy_selection_in_flight: false,
         }
@@ -359,15 +373,49 @@ impl App {
                         Err(error) => self.state.status = format!("延迟测试失败：{error}"),
                     }
                 }
-                WorkerResult::ProviderRefreshed { name, result } => {
-                    self.provider_refresh_in_flight = false;
+                WorkerResult::ProviderRefreshed {
+                    name,
+                    context,
+                    result,
+                } => {
+                    self.provider_refresh_in_flight =
+                        self.provider_refresh_in_flight.saturating_sub(1);
+                    self.last_refresh = Instant::now();
                     match result {
-                        Ok(proxies) => {
-                            apply_proxy_refresh(&mut self.state, proxies);
-                            self.last_refresh = Instant::now();
-                            self.state.status = format!("{name} 订阅及代理列表已刷新");
+                        Ok(data) => {
+                            let proxy_error = match data.proxies {
+                                Ok(proxies) => {
+                                    apply_proxy_refresh(&mut self.state, proxies);
+                                    None
+                                }
+                                Err(error) => Some(error),
+                            };
+                            let mut status = match context {
+                                ProviderRefreshContext::Manual => {
+                                    format!("已更新 {name}，获取 {} 个节点", data.node_count)
+                                }
+                                ProviderRefreshContext::AfterSave { action, backup } => format!(
+                                    "{action} {name}，获取 {} 个节点；备份 {}",
+                                    data.node_count,
+                                    backup.display()
+                                ),
+                            };
+                            if let Some(error) = proxy_error {
+                                status.push_str(&format!("；代理列表刷新失败：{error}"));
+                            }
+                            self.state.status = status;
                         }
-                        Err(error) => self.state.status = format!("订阅更新失败：{error}"),
+                        Err(error) => match context {
+                            ProviderRefreshContext::Manual => {
+                                self.state.status = format!("订阅更新失败：{error}")
+                            }
+                            ProviderRefreshContext::AfterSave { action, backup } => {
+                                self.state.status = format!(
+                                    "{action} {name}，配置已保存，但订阅验证失败：{error}；备份 {}",
+                                    backup.display()
+                                )
+                            }
+                        },
                     }
                 }
             }
@@ -749,7 +797,17 @@ impl App {
                 Ok(()) => {
                     let action = if updating { "已更新" } else { "已新增" };
                     self.add_provider = None;
-                    self.state.status = format!("{action} {name}；备份 {}", backup.display())
+                    let backup_label = backup.display().to_string();
+                    if self.start_provider_refresh(
+                        name.clone(),
+                        ProviderRefreshContext::AfterSave { action, backup },
+                    ) {
+                        self.state.status = format!("{action} {name}，配置已保存；正在验证订阅...")
+                    } else {
+                        self.state.status = format!(
+                            "{action} {name}，配置已保存，但未连接 Mihomo 控制器，无法验证；备份 {backup_label}"
+                        )
+                    }
                 }
                 Err(error) => self.set_add_provider_error(format!("订阅未应用：{error}")),
             },
@@ -1158,7 +1216,7 @@ impl App {
     }
 
     fn refresh_provider(&mut self) {
-        if self.provider_refresh_in_flight {
+        if self.provider_refresh_in_flight > 0 {
             self.state.status = "订阅更新正在进行...".into();
             return;
         }
@@ -1173,20 +1231,37 @@ impl App {
             );
             return;
         }
-        let Some(client) = self.client.clone() else {
+        if self.client.is_none() {
             self.state.status = "未连接 Mihomo 控制器".into();
             return;
-        };
+        }
         let name = provider.name.clone();
-        self.provider_refresh_in_flight = true;
         self.state.status = format!("正在更新 {name} 订阅...");
+        self.start_provider_refresh(name, ProviderRefreshContext::Manual);
+    }
+
+    fn start_provider_refresh(&mut self, name: String, context: ProviderRefreshContext) -> bool {
+        let Some(client) = self.client.clone() else {
+            return false;
+        };
+        self.provider_refresh_in_flight += 1;
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
-            let result = client
-                .refresh_provider(&name)
-                .and_then(|()| client.proxies());
-            let _ = sender.send(WorkerResult::ProviderRefreshed { name, result });
+            let result = client.refresh_provider(&name).and_then(|()| {
+                client
+                    .provider_proxy_count(&name)
+                    .map(|node_count| ProviderRefreshData {
+                        node_count,
+                        proxies: client.proxies(),
+                    })
+            });
+            let _ = sender.send(WorkerResult::ProviderRefreshed {
+                name,
+                context,
+                result,
+            });
         });
+        true
     }
 
     fn rules(&self, frame: &mut Frame, area: Rect) {
@@ -1804,6 +1879,70 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.add_provider.is_none());
+        assert!(app.state.status.contains("配置已保存"));
+        assert!(app.state.status.contains("无法验证"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn provider_save_automatically_refreshes_and_reports_its_node_count() {
+        let (controller, server) = successful_provider_refresh_server();
+        let (directory, path) = provider_test_config("provider-auto-refresh");
+        let mut app = App::new(Some(controller), None, Some(path));
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "airport".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for character in "https://subscriptions.example.com/sub".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for _ in 0..100 {
+            app.process_worker_results();
+            if app.state.status.contains("获取 2 个节点") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(app.add_provider.is_none());
+        assert!(app.state.status.contains("已新增 airport"));
+        assert!(app.state.status.contains("获取 2 个节点"));
+        assert_eq!(app.state.proxies[0].name, "Main");
+        assert_eq!(server.join().unwrap(), 3);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn provider_verification_failure_says_the_config_was_saved() {
+        let (controller, server) = failing_provider_refresh_server();
+        let (directory, path) = provider_test_config("provider-refresh-failure");
+        let mut app = App::new(Some(controller), None, Some(path));
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "airport".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for character in "https://subscriptions.example.com/sub".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for _ in 0..100 {
+            app.process_worker_results();
+            if app.state.status.contains("订阅验证失败") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(app.state.status.contains("配置已保存"));
+        assert!(app.state.status.contains("订阅验证失败"));
+        server.join().unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2082,5 +2221,73 @@ rules:
         )
         .unwrap();
         (directory, path)
+    }
+
+    fn successful_provider_refresh_server() -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut request_count = 0;
+            while request_count < 3 && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("mock server failed: {error}"),
+                };
+                let mut request_line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request_line)
+                    .unwrap();
+                let (status, body) = if request_line.starts_with("PUT /providers/proxies/airport ")
+                {
+                    ("200 OK", r#"{}"#)
+                } else if request_line.starts_with("GET /providers/proxies/airport ") {
+                    (
+                        "200 OK",
+                        r#"{"name":"airport","proxies":[{"name":"Node A"},{"name":"Node B"}]}"#,
+                    )
+                } else if request_line.starts_with("GET /proxies ") {
+                    (
+                        "200 OK",
+                        r#"{"proxies":{"Main":{"type":"Selector","all":["Node A","Node B"],"now":"Node A"},"Node A":{"type":"Shadowsocks","history":[]},"Node B":{"type":"Shadowsocks","history":[]}}}"#,
+                    )
+                } else {
+                    ("500 Internal Server Error", r#"{"message":"unexpected"}"#)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                request_count += 1;
+            }
+            request_count
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn failing_provider_refresh_server() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            assert!(request_line.starts_with("PUT /providers/proxies/airport "));
+            let body = r#"{"message":"download failed"}"#;
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{address}"), server)
     }
 }

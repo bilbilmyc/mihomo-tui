@@ -78,6 +78,21 @@ impl MihomoClient {
         }
     }
 
+    pub fn provider_proxy_count(&self, name: &str) -> Result<usize, String> {
+        let response = self
+            .request(self.http.get(self.provider_url(name)))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("Mihomo returned {}", response.status()));
+        }
+        let body: Value = response.json().map_err(|error| error.to_string())?;
+        body.get("proxies")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .ok_or_else(|| "provider response has no proxies list".into())
+    }
+
     pub fn probe_delay(&self, name: &str) -> Result<ProxyDelay, String> {
         let response = self
             .request(
@@ -274,6 +289,32 @@ mod tests {
             client.provider_url("my provider"),
             "http://127.0.0.1:9090/providers/proxies/my%20provider"
         );
+    }
+
+    #[test]
+    fn provider_proxy_count_reads_the_selected_provider() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            assert!(request_line.starts_with("GET /providers/proxies/airport "));
+            let body = r#"{"name":"airport","proxies":[{"name":"Node A"},{"name":"Node B"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = MihomoClient::new(format!("http://{address}"), None).unwrap();
+
+        let count = client.provider_proxy_count("airport").unwrap();
+
+        server.join().unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
