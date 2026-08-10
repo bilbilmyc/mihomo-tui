@@ -1067,8 +1067,7 @@ impl App {
         let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(area);
         if self.state.proxies.is_empty() {
-            let (message, color) = if self.refresh_in_flight
-                || self.state.status == "正在连接 Mihomo..."
+            let (message, color) = if self.state.status == "正在连接 Mihomo..."
                 || self.state.status == "正在刷新代理列表..."
             {
                 ("正在加载代理组...", Color::Cyan)
@@ -1712,6 +1711,13 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let screen = terminal.backend().to_string();
         assert!(screen.contains("无法连接 Mihomo 控制器"), "{screen}");
+
+        app.refresh_in_flight = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("无法连接 Mihomo 控制器"), "{screen}");
+        app.refresh_in_flight = false;
 
         app.state.status = "已连接，代理列表已刷新".into();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
