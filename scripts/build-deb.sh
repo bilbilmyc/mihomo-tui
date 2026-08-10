@@ -47,8 +47,14 @@ for tool in awk cargo chmod curl dpkg dpkg-deb dpkg-shlibdeps du file install jq
 done
 
 case $architecture in
-  amd64) rust_arch=x86_64 ;;
-  arm64) rust_arch=aarch64 ;;
+  amd64)
+    rust_arch=x86_64
+    core_asset_prefix=mihomo-linux-amd64-v1-
+    ;;
+  arm64)
+    rust_arch=aarch64
+    core_asset_prefix=mihomo-linux-arm64-
+    ;;
   *)
     echo "unsupported Debian architecture: $architecture" >&2
     exit 1
@@ -73,7 +79,10 @@ license_asset=$(jq -er '.license.asset' "$manifest")
 license_sha256=$(jq -er '.license.sha256' "$manifest")
 license_spdx=$(jq -er '.license.spdx' "$manifest")
 [[ $core_tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-[[ $core_asset == "mihomo-linux-$architecture-v1-$core_tag.deb" ]]
+[[ $core_asset == "$core_asset_prefix$core_tag.deb" ]] || {
+  echo "manifest asset does not match $architecture naming policy: $core_asset" >&2
+  exit 1
+}
 [[ $core_deb_version == "${core_tag#v}" ]]
 [[ $core_sha256 =~ ^[0-9a-f]{64}$ ]]
 [[ $license_asset == LICENSE && $license_spdx == GPL-3.0 ]]
