@@ -268,6 +268,22 @@ impl App {
                 });
                 false
             }
+            KeyCode::Char('e') if self.state.page == Page::Config => {
+                let Some(provider) = self.config.providers.get(self.state.selected) else {
+                    self.state.status = "未选择订阅".into();
+                    return false;
+                };
+                if provider.kind != "http" {
+                    self.state.status = format!("{} 不是 HTTP 订阅，无法修改 URL", provider.name);
+                    return false;
+                }
+                self.add_provider = Some(AddProviderDialog {
+                    name: provider.name.clone(),
+                    url: String::new(),
+                    editing_url: true,
+                });
+                false
+            }
             KeyCode::Char('t') if self.state.page == Page::Dashboard => {
                 self.settings_dialog = Some(SettingsDialog::tun(&self.config.tun));
                 false
@@ -559,14 +575,21 @@ impl App {
             self.state.status = "No Mihomo config path discovered".into();
             return;
         };
+        let updating = self
+            .config
+            .providers
+            .iter()
+            .any(|provider| provider.name == dialog.name);
         match config::add_http_provider(path, &dialog.name, &dialog.url) {
             Ok(backup) => match self.finalize_config_change(&backup) {
                 Ok(()) => {
-                    self.state.status = format!("已新增 {}；备份 {}", dialog.name, backup.display())
+                    let action = if updating { "已更新" } else { "已新增" };
+                    self.state.status =
+                        format!("{action} {}；备份 {}", dialog.name, backup.display())
                 }
                 Err(error) => self.state.status = format!("订阅未应用：{error}"),
             },
-            Err(error) => self.state.status = format!("Provider not added: {error}"),
+            Err(error) => self.state.status = format!("订阅未保存：{error}"),
         }
     }
 
@@ -752,7 +775,7 @@ impl App {
             (Page::Proxies, false) => "j/k 代理组  Right/Enter 节点  r 刷新  q 退出",
             (Page::Proxies, true) => "j/k 节点  Enter 应用  l 延迟  Left 返回  q 退出",
             (Page::Rules, _) => "j/k 规则  a/A 前/后新增  e 编辑  x 删除  J/K 排序  s 保存",
-            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  r 更新  q 退出",
+            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  q 退出",
         }
     }
 
@@ -1066,7 +1089,7 @@ impl App {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" 代理订阅（a 新增，r 刷新 HTTP 订阅） "));
+        .block(Block::bordered().title(" 代理订阅（a 新增，e 改址，r 刷新） "));
         frame.render_stateful_widget(
             table,
             area,
@@ -1088,7 +1111,7 @@ impl App {
                 "{name_label}: {}\n{url_label}: {}\n\nTab 切换字段  回车保存  Esc 取消",
                 dialog.name, dialog.url
             ))
-            .block(Block::bordered().title(" 新增 HTTP 订阅 "))
+            .block(Block::bordered().title(" 新增或更新 HTTP 订阅 "))
             .style(Style::default().fg(Color::White)),
             area,
         );
@@ -1422,6 +1445,26 @@ mod tests {
         let should_quit = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         assert!(should_quit);
+    }
+
+    #[test]
+    fn edit_provider_opens_the_dialog_for_a_replacement_url() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.config.providers = vec![crate::config::Provider {
+            name: "airport".into(),
+            kind: "http".into(),
+            url: Some("https://old.example.com/sub".into()),
+            path: None,
+            interval: None,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let dialog = app.add_provider.as_ref().unwrap();
+        assert_eq!(dialog.name, "airport");
+        assert!(dialog.url.is_empty());
+        assert!(dialog.editing_url);
     }
 
     #[test]

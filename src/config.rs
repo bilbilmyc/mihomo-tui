@@ -358,6 +358,135 @@ proxy-groups:
 
         assert!(error.contains("valid HTTP URL"));
     }
+
+    #[test]
+    fn updates_existing_http_provider_without_duplicating_its_group() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-provider-update-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+mixed-port: 7890
+mode: rule
+proxy-providers:
+  airport:
+    type: http
+    url: https://old.example.com/sub
+    path: ./proxy-providers/airport.yaml
+    interval: 3600
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+proxy-groups:
+  - name: Main
+    type: select
+    use: [airport]
+    proxies: [DIRECT]
+rules:
+  - MATCH,DIRECT
+"#,
+        )
+        .unwrap();
+
+        let backup =
+            super::add_http_provider(&path, "airport", "https://new.example.com/sub").unwrap();
+        let document: Value = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let root = document.as_mapping().unwrap();
+        let provider = root["proxy-providers"]["airport"].as_mapping().unwrap();
+
+        assert_eq!(provider["url"], "https://new.example.com/sub");
+        assert_eq!(provider["path"], "./proxy-providers/airport.yaml");
+        assert_eq!(provider["interval"], 3600);
+        assert_eq!(provider["health-check"]["interval"], 300);
+        assert_eq!(root["proxy-groups"].as_sequence().unwrap().len(), 1);
+        fs::remove_file(backup).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn adds_http_provider_with_a_distinct_proxy_group_name() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-provider-add-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+mixed-port: 7890
+mode: rule
+proxy-providers: {}
+proxy-groups:
+  - name: airport-select
+    type: select
+    proxies: [DIRECT]
+rules:
+  - MATCH,DIRECT
+"#,
+        )
+        .unwrap();
+
+        let backup =
+            super::add_http_provider(&path, "airport", "https://subscriptions.example.com/sub")
+                .unwrap();
+        let snapshot = super::load(&path).unwrap();
+
+        assert_eq!(snapshot.providers[0].name, "airport");
+        assert_eq!(snapshot.provider_groups["airport"], ["airport-select-2"]);
+        fs::remove_file(backup).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_replace_a_file_provider_with_an_http_provider() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-file-provider-update-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+proxy-providers:
+  airport:
+    type: file
+    path: ./proxy-providers/airport.yaml
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+"#,
+        )
+        .unwrap();
+
+        let error =
+            super::add_http_provider(&path, "airport", "https://subscriptions.example.com/sub")
+                .unwrap_err();
+
+        assert_eq!(error, "Provider airport is not an HTTP provider");
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
 }
 use serde_yaml::{Mapping, Value};
 use std::{
@@ -513,28 +642,65 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
         .or_insert_with(|| Value::Mapping(Mapping::new()))
         .as_mapping_mut()
         .ok_or_else(|| "proxy-providers must be a mapping".to_string())?;
-    if providers.contains_key(Value::String(name.into())) {
-        return Err(format!("Provider {name} already exists"));
+    let provider_key = Value::String(name.into());
+    let updating = providers.contains_key(&provider_key);
+    if let Some(provider) = providers.get_mut(&provider_key) {
+        let provider = provider
+            .as_mapping_mut()
+            .ok_or_else(|| format!("Provider {name} must be a mapping"))?;
+        if field(provider, "type").and_then(Value::as_str) != Some("http") {
+            return Err(format!("Provider {name} is not an HTTP provider"));
+        }
+        provider.insert(Value::String("url".into()), Value::String(url.into()));
+    } else {
+        let mut provider = Mapping::new();
+        provider.insert(Value::String("type".into()), Value::String("http".into()));
+        provider.insert(Value::String("url".into()), Value::String(url.into()));
+        provider.insert(
+            Value::String("path".into()),
+            Value::String(format!("./proxy-providers/{name}.yaml")),
+        );
+        provider.insert(
+            Value::String("interval".into()),
+            Value::Number(86_400.into()),
+        );
+        providers.insert(provider_key, Value::Mapping(provider));
     }
-    let mut provider = Mapping::new();
-    provider.insert(Value::String("type".into()), Value::String("http".into()));
-    provider.insert(Value::String("url".into()), Value::String(url.into()));
-    provider.insert(
-        Value::String("path".into()),
-        Value::String(format!("./proxy-providers/{name}.yaml")),
-    );
-    provider.insert(
-        Value::String("interval".into()),
-        Value::Number(86_400.into()),
-    );
-    providers.insert(Value::String(name.into()), Value::Mapping(provider));
+    let provider_names: Vec<String> = providers
+        .keys()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if updating {
+        return write_validated(path, &document);
+    }
     let groups = root
         .entry(Value::String("proxy-groups".into()))
         .or_insert_with(|| Value::Sequence(Vec::new()))
         .as_sequence_mut()
         .ok_or_else(|| "proxy-groups must be a list".to_string())?;
+    let group_name_in_use = |candidate: &str| {
+        provider_names.iter().any(|name| name == candidate)
+            || groups.iter().any(|group| {
+                group
+                    .as_mapping()
+                    .and_then(|group| field(group, "name"))
+                    .and_then(Value::as_str)
+                    == Some(candidate)
+            })
+    };
+    let group_name = (1_u64..)
+        .map(|suffix| {
+            if suffix == 1 {
+                format!("{name}-select")
+            } else {
+                format!("{name}-select-{suffix}")
+            }
+        })
+        .find(|candidate| !group_name_in_use(candidate))
+        .ok_or_else(|| "Could not allocate a proxy group name".to_string())?;
     let mut group = Mapping::new();
-    group.insert(Value::String("name".into()), Value::String(name.into()));
+    group.insert(Value::String("name".into()), Value::String(group_name));
     group.insert(Value::String("type".into()), Value::String("select".into()));
     group.insert(
         Value::String("use".into()),

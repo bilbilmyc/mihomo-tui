@@ -193,11 +193,19 @@ pub fn reload_service() -> Result<(), String> {
     ensure_systemd()?;
     validate_systemd_unit(UnitExpectation::Packaged)?;
     let systemctl = systemctl_path()?;
+    let (description, arguments) = config_apply_command();
     let output = clean_command(&systemctl)
-        .args(["reload", "mihomo.service"])
+        .args(arguments)
         .output()
-        .map_err(|error| format!("无法执行 systemctl reload：{error}"))?;
-    checked_output("systemctl reload mihomo.service", output).map(|_| ())
+        .map_err(|error| format!("无法执行 {description}：{error}"))?;
+    checked_output(description, output).map(|_| ())
+}
+
+fn config_apply_command() -> (&'static str, [&'static str; 2]) {
+    (
+        "systemctl reload-or-restart mihomo.service",
+        ["reload-or-restart", "mihomo.service"],
+    )
 }
 
 pub fn validate_config(candidate: &Path, data_dir: &Path) -> Result<Output, String> {
@@ -1078,6 +1086,14 @@ rules:
         assert_eq!(service_action(true, true), ServiceAction::ReloadOrRestart);
         assert_eq!(service_action(true, false), ServiceAction::None);
         assert_eq!(service_action(false, true), ServiceAction::EnableAndStart);
+    }
+
+    #[test]
+    fn applying_an_edited_config_starts_an_inactive_service() {
+        let (description, arguments) = config_apply_command();
+
+        assert_eq!(description, "systemctl reload-or-restart mihomo.service");
+        assert_eq!(arguments, ["reload-or-restart", "mihomo.service"]);
     }
 
     #[test]

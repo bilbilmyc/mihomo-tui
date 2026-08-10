@@ -72,7 +72,8 @@ Keys:
 - `Tab`: next page
 - `j`/`k` or arrow keys: move selection
 - `r`: refresh Mihomo data; on the configuration page, update the selected HTTP provider first
-- `a`: add an HTTP provider from the configuration page
+- `a`: add an HTTP provider from the configuration page; using an existing HTTP provider name updates its URL
+- `e`: replace the selected HTTP provider URL from the configuration page
 - `Right` or `Enter`: enter the selected proxy group's node list; on the subscription page, open a selectable proxy group
 - `Left`: return to proxy groups
 - `Enter`: apply the selected node when the node list is focused
