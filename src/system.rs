@@ -7,6 +7,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+#[cfg(unix)]
+const ROOT_UID: u32 = 0;
+
 pub struct RuntimeLock {
     _file: File,
 }
@@ -39,7 +42,9 @@ pub fn trusted_root_file(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
-    metadata.file_type().is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    metadata.file_type().is_file()
+        && owner_is_trusted(metadata.uid())
+        && metadata.mode() & 0o022 == 0
 }
 
 #[cfg(not(unix))]
@@ -52,12 +57,33 @@ pub fn trusted_root_directory(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
-    metadata.file_type().is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    metadata.file_type().is_dir()
+        && owner_is_trusted(metadata.uid())
+        && metadata.mode() & 0o022 == 0
 }
 
 #[cfg(not(unix))]
 pub fn trusted_root_directory(_path: &Path) -> bool {
     false
+}
+
+#[cfg(unix)]
+fn production_owner_is_trusted(uid: u32) -> bool {
+    uid == ROOT_UID
+}
+
+#[cfg(all(unix, not(test)))]
+fn owner_is_trusted(uid: u32) -> bool {
+    production_owner_is_trusted(uid)
+}
+
+#[cfg(all(unix, test))]
+fn owner_is_trusted(uid: u32) -> bool {
+    production_owner_is_trusted(uid)
+        || std::env::current_exe()
+            .ok()
+            .and_then(|path| fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.uid() == uid)
 }
 
 #[cfg(unix)]
@@ -110,6 +136,14 @@ pub fn checked_output(action: &str, output: Output) -> Result<Output, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn production_owner_policy_only_accepts_root() {
+        assert!(production_owner_is_trusted(0));
+        assert!(!production_owner_is_trusted(1));
+        assert!(!production_owner_is_trusted(u32::MAX));
+    }
 
     #[cfg(unix)]
     #[test]

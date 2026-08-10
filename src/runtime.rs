@@ -1,6 +1,6 @@
 use crate::{
     core::{CoreRelease, CoreVersion},
-    core_manager::CorePaths,
+    core_manager::{CorePaths, managed_active_version},
     core_package,
     system::{
         acquire_runtime_lock, checked_output, clean_command, effective_root, run_privileged,
@@ -80,7 +80,7 @@ pub fn ensure(mode: RuntimeMode, auto_install: bool) -> Result<(), String> {
     if mode == RuntimeMode::External {
         return Ok(());
     }
-    let inventory = inspect();
+    let inventory = inspect()?;
     match plan(mode, inventory, auto_install) {
         Action::None => Ok(()),
         Action::RejectPartialInstall => Err(partial_install_error(inventory)),
@@ -89,7 +89,7 @@ pub fn ensure(mode: RuntimeMode, auto_install: bool) -> Result<(), String> {
                 return Err(root_required_message().into());
             }
             let _lock = acquire_runtime_lock()?;
-            let inventory = inspect();
+            let inventory = inspect()?;
             match plan(mode, inventory, auto_install) {
                 Action::None => Ok(()),
                 Action::Prepare => prepare_existing_for_apply(),
@@ -118,7 +118,7 @@ fn prepare_existing_for_apply() -> Result<(), String> {
 }
 
 fn validate_installed_core(requirement: VersionRequirement) -> Result<CoreVersion, String> {
-    let binary = mihomo_binary_path()
+    let binary = mihomo_binary_path()?
         .ok_or_else(|| "未在受信任路径中找到 Mihomo（/usr/bin 或 /usr/local/bin）".to_string())?;
     validate_installed_core_at(&binary, requirement)
 }
@@ -176,7 +176,7 @@ fn config_apply_command() -> (&'static str, [&'static str; 2]) {
 }
 
 pub fn validate_config(candidate: &Path, data_dir: &Path) -> Result<Output, String> {
-    let binary = mihomo_binary_path()
+    let binary = mihomo_binary_path()?
         .ok_or_else(|| "未在受信任路径中找到 Mihomo（/usr/bin 或 /usr/local/bin）".to_string())?;
     clean_command(&binary)
         .args(["-t", "-f"])
@@ -188,7 +188,7 @@ pub fn validate_config(candidate: &Path, data_dir: &Path) -> Result<Output, Stri
 }
 
 pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
-    let binary = mihomo_binary_path().ok_or_else(|| "找不到受信任的 Mihomo".to_string())?;
+    let binary = mihomo_binary_path()?.ok_or_else(|| "找不到受信任的 Mihomo".to_string())?;
     configure_workspace_service_with_binary(config_path, &binary)
 }
 
@@ -302,11 +302,11 @@ fn workspace_drop_in_content(binary: &Path) -> String {
     )
 }
 
-fn inspect() -> Inventory {
-    Inventory {
-        binary: BINARY_PATHS.iter().any(path_present),
+fn inspect() -> Result<Inventory, String> {
+    Ok(Inventory {
+        binary: mihomo_binary_path()?.is_some(),
         unit: UNIT_PATHS.iter().any(path_present),
-    }
+    })
 }
 
 fn path_present(path: impl AsRef<Path>) -> bool {
@@ -329,11 +329,24 @@ fn validate_existing_install() -> Result<(), String> {
     Ok(())
 }
 
-fn mihomo_binary_path() -> Option<PathBuf> {
-    BINARY_PATHS
+fn mihomo_binary_path() -> Result<Option<PathBuf>, String> {
+    mihomo_binary_path_at(
+        &CorePaths::system(),
+        &BINARY_PATHS.iter().map(PathBuf::from).collect::<Vec<_>>(),
+    )
+}
+
+fn mihomo_binary_path_at(
+    managed_paths: &CorePaths,
+    legacy_paths: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    if let Some(version) = managed_active_version(managed_paths)? {
+        return Ok(Some(managed_paths.binary(version)));
+    }
+    Ok(legacy_paths
         .iter()
-        .map(PathBuf::from)
         .find(|path| trusted_root_file(path))
+        .cloned())
 }
 
 fn systemctl_path() -> Result<PathBuf, String> {
@@ -657,5 +670,38 @@ mod tests {
             workspace_drop_in_content(Path::new("/usr/bin/mihomo")),
             "[Service]\nExecStart=\nExecStart=/usr/bin/mihomo -d /etc/mihomo-tui\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_managed_core_is_selected_without_a_legacy_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Path::new("/tmp").join(format!(
+            "mihomo-tui-runtime-bundle-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("mihomo");
+        fs::write(
+            &source,
+            "#!/bin/sh\nprintf 'Mihomo Meta v1.19.29 linux amd64\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = CorePaths::under(&root.join("managed"));
+        let version = CoreVersion::parse("v1.19.29").unwrap();
+        crate::core_manager::install_version(&paths, &source, version).unwrap();
+        crate::core_manager::switch_current(&paths, version).unwrap();
+
+        let selected = mihomo_binary_path_at(&paths, &[]).unwrap();
+
+        assert_eq!(selected, Some(paths.binary(version)));
+        fs::remove_dir_all(root).unwrap();
     }
 }
