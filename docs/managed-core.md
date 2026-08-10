@@ -39,11 +39,11 @@ sudo ./target/release/mihomo-tui core upgrade
 
 ```text
 managed-core.json       Embedded, reviewable official-core release contract
-src/core.rs             Manifest parsing, validation, version parsing, compatibility policy
+src/core/               Version parsing, manifest validation, and compatibility policy
 src/system.rs           Trusted root files, sanitized commands, and private temporary paths
-src/core_package.rs     Official package download, integrity checks, metadata, and extraction
+src/core_package/       Download, integrity, Deb metadata, extraction, and secure temporary files
 src/core_manager/       Managed-core facade, inventory, immutable storage, and tests
-src/core_upgrade.rs     Candidate validation, activation, API health checks, and rollback
+src/core_upgrade/       Candidate orchestration, activation, API health checks, and rollback
 src/runtime/            Runtime facade, installation, systemd lifecycle, and tests
 src/mihomo.rs           External Controller API boundary
 packaging/debian/       Unit and maintainer-script templates
