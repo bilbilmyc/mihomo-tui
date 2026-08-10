@@ -62,6 +62,24 @@ Automatic installation currently supports `x86_64` and `aarch64` Debian/Ubuntu s
 systemd. It never upgrades an existing installation and refuses to overwrite a partial installation
 where only the binary or service exists.
 
+## Managed Core Policy
+
+Mihomo remains a separate process, but its tested release contract is part of the product. The
+embedded [`managed-core.json`](managed-core.json) manifest is the only source of package names,
+architectures, versions, and SHA-256 hashes used by the installer. The current contract recommends
+`v1.19.29` and accepts installed versions from `v1.19.28` up to, but not including, `v1.20.0` for
+locally managed apply.
+
+Pressing `p` checks an existing local core against that tested range before validating or reloading
+the configuration. A too-old or untested-newer core is left untouched and produces an actionable
+error. Existing cores are never silently upgraded, and normal startup never checks for or installs a
+new upstream release.
+
+Upstream versions enter `mihomo-tui` through a reviewed manifest update, architecture builds, config
+validation, and Controller API integration tests. Explicit staged upgrade and automatic rollback are
+planned before any in-app upgrade action is enabled. The complete contract and phased delivery plan
+are documented in [`docs/managed-core.md`](docs/managed-core.md).
+
 Prevent downloads during explicit apply:
 
 ```bash

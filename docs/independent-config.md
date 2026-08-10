@@ -71,15 +71,22 @@ managed local backend it performs:
 
 1. Prepare or optionally install Mihomo without starting an existing stopped
    service on another config.
-2. Validate `/etc/mihomo-tui/config.yaml` with the trusted Mihomo executable.
-3. Install a root-owned systemd drop-in that sets Mihomo's data directory to
+2. Require an existing core to be inside the compatibility range embedded in
+   `managed-core.json`. A clean-host install must exactly match the recommended
+   version and package metadata in that manifest.
+3. Validate `/etc/mihomo-tui/config.yaml` with the trusted Mihomo executable.
+4. Install a root-owned systemd drop-in that sets Mihomo's data directory to
    `/etc/mihomo-tui`.
-4. Reload systemd and run `systemctl reload-or-restart mihomo.service`.
-5. Refresh configured HTTP providers and verify that they return nodes.
+5. Reload systemd and run `systemctl reload-or-restart mihomo.service`.
+6. Refresh configured HTTP providers and verify that they return nodes.
 
 Validation failure leaves the saved config available for correction and does
 not reload the service. The managed drop-in is the only supported override;
 unknown service drop-ins are rejected rather than overwritten.
+
+Startup and apply never upgrade an existing core. A new upstream Mihomo version
+must first be added to the reviewed manifest and pass the managed-core release
+checks described in `docs/managed-core.md`.
 
 External controller or explicit legacy-config mode never manages local systemd.
 Its config remains editable, but local apply is unavailable.
