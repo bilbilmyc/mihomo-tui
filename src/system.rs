@@ -1,11 +1,38 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     path::Path,
     process::{Command, Output},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+pub struct RuntimeLock {
+    _file: File,
+}
+
+pub fn acquire_runtime_lock() -> Result<RuntimeLock, String> {
+    let path = Path::new("/run/mihomo-tui.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("无法打开 Mihomo 运行时锁：{error}"))?;
+    #[cfg(unix)]
+    {
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("无法检查 Mihomo 运行时锁：{error}"))?;
+        if !metadata.file_type().is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err("/run/mihomo-tui.lock 的所有者或权限不安全".into());
+        }
+    }
+    file.try_lock()
+        .map_err(|error| format!("另一个 mihomo-tui 正在管理本机服务：{error}"))?;
+    Ok(RuntimeLock { _file: file })
+}
 
 #[cfg(unix)]
 pub fn trusted_root_file(path: &Path) -> bool {

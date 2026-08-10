@@ -1,6 +1,8 @@
 use crate::{
     core::{CorePackage, CoreRelease},
-    system::{checked_output, clean_command, run_privileged, trusted_root_file},
+    system::{
+        checked_output, clean_command, run_privileged, trusted_root_directory, trusted_root_file,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,7 +13,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -41,6 +43,48 @@ impl DownloadedPackage {
 impl Drop for DownloadedPackage {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+struct PrivateDirectory {
+    path: PathBuf,
+}
+
+impl PrivateDirectory {
+    #[cfg(unix)]
+    fn create(prefix: &str) -> Result<Self, String> {
+        let path = secure_temp_dir()?.join(format!("{prefix}-{}", random_hex(16)?));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|error| format!("无法创建私有临时目录 {}：{error}", path.display()))?;
+        if !trusted_root_directory(&path) {
+            let _ = fs::remove_dir(&path);
+            return Err(format!("私有临时目录 {} 的权限不安全", path.display()));
+        }
+        Ok(Self { path })
+    }
+
+    #[cfg(not(unix))]
+    fn create(_prefix: &str) -> Result<Self, String> {
+        Err("内核解包仅支持 Unix 系统".into())
+    }
+}
+
+impl Drop for PrivateDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+pub struct ExtractedCore {
+    _directory: PrivateDirectory,
+    candidate: PathBuf,
+}
+
+impl ExtractedCore {
+    pub fn candidate(&self) -> &Path {
+        &self.candidate
     }
 }
 
@@ -107,6 +151,55 @@ pub fn install_deb(path: &Path) -> Result<(), String> {
         &["--force-confold", "--install", path],
     )?;
     checked_output("dpkg 安装 Mihomo", output).map(|_| ())
+}
+
+pub fn extract_core(package: &DownloadedPackage) -> Result<ExtractedCore, String> {
+    let dpkg_deb = Path::new("/usr/bin/dpkg-deb");
+    if !trusted_root_file(dpkg_deb) {
+        return Err("找不到受信任的 /usr/bin/dpkg-deb".into());
+    }
+    let directory = PrivateDirectory::create("mihomo-tui-core")?;
+    let output = clean_command(dpkg_deb)
+        .arg("--extract")
+        .arg(package.path())
+        .arg(&directory.path)
+        .output()
+        .map_err(|error| format!("无法解包 Mihomo deb：{error}"))?;
+    checked_output("dpkg-deb --extract", output)?;
+    let candidate = validate_extracted_candidate(&directory.path)?;
+    Ok(ExtractedCore {
+        _directory: directory,
+        candidate,
+    })
+}
+
+fn validate_extracted_candidate(root: &Path) -> Result<PathBuf, String> {
+    let usr = root.join("usr");
+    let bin = usr.join("bin");
+    for directory in [root, usr.as_path(), bin.as_path()] {
+        if !trusted_root_directory(directory) {
+            return Err(format!(
+                "解包后的 Mihomo 目录 {} 的所有者或权限不安全",
+                directory.display()
+            ));
+        }
+    }
+    let candidate = bin.join("mihomo");
+    if !trusted_root_file(&candidate) {
+        return Err(format!(
+            "解包后未找到安全的普通文件 {}",
+            candidate.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(&candidate)
+            .map_err(|error| format!("无法检查 Mihomo 候选文件：{error}"))?;
+        if metadata.mode() & 0o111 == 0 {
+            return Err("解包后的 Mihomo 候选文件不可执行".into());
+        }
+    }
+    Ok(candidate)
 }
 
 fn validate_deb_file(path: &Path, package: &CorePackage) -> Result<(), String> {
@@ -240,6 +333,9 @@ fn copy_verified(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
     #[test]
     fn supported_debian_architectures_use_pinned_packages() {
         let release = CoreRelease::embedded().unwrap();
@@ -339,5 +435,31 @@ mod tests {
         assert!(!allowed_release_url(
             &reqwest::Url::parse("https://example.com/file").unwrap()
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_candidate_must_be_the_exact_regular_executable() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Path::new("/tmp").join(format!(
+            "mihomo-tui-extracted-{}-{unique}",
+            std::process::id()
+        ));
+        let binary = root.join("usr/bin/mihomo");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"candidate").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(validate_extracted_candidate(&root).unwrap(), binary);
+
+        fs::remove_file(&binary).unwrap();
+        symlink("/usr/bin/mihomo", &binary).unwrap();
+        assert!(validate_extracted_candidate(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

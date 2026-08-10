@@ -1,4 +1,7 @@
-use crate::models::{ProxyDelay, ProxySummary};
+use crate::{
+    core::CoreVersion,
+    models::{ProxyDelay, ProxySummary},
+};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
@@ -47,6 +50,22 @@ impl MihomoClient {
         }
         let body: Value = response.json().map_err(|e| e.to_string())?;
         parse_proxies(&body)
+    }
+
+    pub fn version(&self) -> Result<CoreVersion, String> {
+        let response = self
+            .request(self.http.get(format!("{}/version", self.base_url)))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("Mihomo returned {}", response.status()));
+        }
+        let body: Value = response.json().map_err(|error| error.to_string())?;
+        let version = body
+            .get("version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Mihomo version response has no version string".to_string())?;
+        CoreVersion::parse(version)
     }
 
     pub fn select_proxy(&self, group: &str, proxy: &str) -> Result<(), String> {
@@ -315,6 +334,32 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn version_reads_the_exact_controller_version() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            assert!(request_line.starts_with("GET /version "));
+            let body = r#"{"meta":true,"version":"v1.19.29"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = MihomoClient::new(format!("http://{address}"), None).unwrap();
+
+        let version = client.version().unwrap();
+
+        server.join().unwrap();
+        assert_eq!(version.to_string(), "v1.19.29");
     }
 
     #[test]

@@ -1,10 +1,14 @@
 use crate::{
     core::{CoreRelease, CoreVersion},
+    core_manager::CorePaths,
     core_package,
-    system::{checked_output, clean_command, effective_root, run_privileged, trusted_root_file},
+    system::{
+        acquire_runtime_lock, checked_output, clean_command, effective_root, run_privileged,
+        trusted_root_file,
+    },
 };
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     process::Output,
@@ -52,10 +56,6 @@ struct SystemdUnitState {
     load_state: String,
     fragment_path: Option<PathBuf>,
     drop_in_paths: Vec<PathBuf>,
-}
-
-struct RuntimeLock {
-    _file: File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,29 +109,6 @@ fn partial_install_error(inventory: Inventory) -> String {
         "检测到不完整的 Mihomo 安装（binary={}，service={}），为避免覆盖现有文件已停止；请修复后重试或使用 --controller",
         inventory.binary, inventory.unit
     )
-}
-
-fn acquire_runtime_lock() -> Result<RuntimeLock, String> {
-    let path = Path::new("/run/mihomo-tui.lock");
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options
-        .open(path)
-        .map_err(|error| format!("无法打开 Mihomo 运行时锁：{error}"))?;
-    #[cfg(unix)]
-    {
-        let metadata = file
-            .metadata()
-            .map_err(|error| format!("无法检查 Mihomo 运行时锁：{error}"))?;
-        if !metadata.file_type().is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err("/run/mihomo-tui.lock 的所有者或权限不安全".into());
-        }
-    }
-    file.try_lock()
-        .map_err(|error| format!("另一个 mihomo-tui 正在管理本机服务：{error}"))?;
-    Ok(RuntimeLock { _file: file })
 }
 
 fn prepare_existing_for_apply() -> Result<(), String> {
@@ -211,6 +188,32 @@ pub fn validate_config(candidate: &Path, data_dir: &Path) -> Result<Output, Stri
 }
 
 pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
+    let binary = mihomo_binary_path().ok_or_else(|| "找不到受信任的 Mihomo".to_string())?;
+    configure_workspace_service_with_binary(config_path, &binary)
+}
+
+pub(crate) fn validate_upgrade_service() -> Result<(), String> {
+    if !effective_root() {
+        return Err(root_required_message().into());
+    }
+    validate_systemd_unit(UnitExpectation::Packaged)
+}
+
+pub(crate) fn configure_managed_core_service() -> Result<(), String> {
+    let binary = CorePaths::system().active_binary();
+    if !trusted_root_file(&binary) {
+        return Err(format!("找不到受信任的托管 Mihomo {}", binary.display()));
+    }
+    configure_workspace_service_with_binary(
+        Path::new(crate::workspace::DEFAULT_SOURCE_PATH),
+        &binary,
+    )
+}
+
+fn configure_workspace_service_with_binary(
+    config_path: &Path,
+    binary: &Path,
+) -> Result<(), String> {
     if config_path != Path::new(crate::workspace::DEFAULT_SOURCE_PATH) {
         return Err(format!(
             "本机托管模式只支持 {}",
@@ -221,7 +224,6 @@ pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
         return Err(root_required_message().into());
     }
     validate_systemd_unit(UnitExpectation::Packaged)?;
-    let binary = mihomo_binary_path().ok_or_else(|| "找不到受信任的 Mihomo".to_string())?;
     let drop_in = Path::new(MANAGED_DROP_IN);
     let directory = drop_in
         .parent()
@@ -245,7 +247,7 @@ pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
             return Err(format!("{} 的所有者或权限不安全", directory.display()));
         }
     }
-    let content = workspace_drop_in_content(&binary);
+    let content = workspace_drop_in_content(binary);
     if fs::symlink_metadata(drop_in).is_ok() && !trusted_root_file(drop_in) {
         return Err(format!("{} 不是安全的 root 普通文件", drop_in.display()));
     }
@@ -275,6 +277,22 @@ pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("无法同步 Mihomo systemd drop-in 目录：{error}"))?;
     daemon_reload()
+}
+
+pub(crate) fn restart_service() -> Result<(), String> {
+    ensure_systemd()?;
+    validate_systemd_unit(UnitExpectation::Packaged)?;
+    let systemctl = systemctl_path()?;
+    let (description, arguments) = core_upgrade_restart_command();
+    let output = run_privileged(&systemctl, &arguments)?;
+    checked_output(description, output).map(|_| ())
+}
+
+fn core_upgrade_restart_command() -> (&'static str, [&'static str; 2]) {
+    (
+        "systemctl restart mihomo.service",
+        ["restart", "mihomo.service"],
+    )
 }
 
 fn workspace_drop_in_content(binary: &Path) -> String {
@@ -592,6 +610,14 @@ mod tests {
 
         assert_eq!(description, "systemctl reload-or-restart mihomo.service");
         assert_eq!(arguments, ["reload-or-restart", "mihomo.service"]);
+    }
+
+    #[test]
+    fn core_upgrade_uses_a_full_service_restart() {
+        let (description, arguments) = core_upgrade_restart_command();
+
+        assert_eq!(description, "systemctl restart mihomo.service");
+        assert_eq!(arguments, ["restart", "mihomo.service"]);
     }
 
     #[test]

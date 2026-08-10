@@ -3,6 +3,7 @@ mod config;
 mod core;
 mod core_manager;
 mod core_package;
+mod core_upgrade;
 mod dialogs;
 mod discovery;
 mod mihomo;
@@ -59,6 +60,8 @@ enum Command {
 enum CoreCommand {
     /// Report installed, active, recommended, and compatible core versions.
     Status,
+    /// Explicitly stage, activate, health-check, and roll back a core update.
+    Upgrade,
 }
 
 fn main() -> ExitCode {
@@ -137,6 +140,15 @@ fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", core_manager::status().map_err(std::io::Error::other)?);
             Ok(())
         }
+        Command::Core {
+            command: CoreCommand::Upgrade,
+        } => {
+            println!(
+                "{}",
+                core_upgrade::upgrade().map_err(std::io::Error::other)?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -195,6 +207,18 @@ mod tests {
             args.unwrap().command,
             Some(Command::Core {
                 command: CoreCommand::Status
+            })
+        ));
+    }
+
+    #[test]
+    fn core_upgrade_is_an_explicit_cli_subcommand() {
+        let args = Args::try_parse_from(["mihomo-tui", "core", "upgrade"]);
+
+        assert!(matches!(
+            args.unwrap().command,
+            Some(Command::Core {
+                command: CoreCommand::Upgrade
             })
         ));
     }
