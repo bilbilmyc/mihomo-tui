@@ -264,7 +264,7 @@ impl App {
                     snapshot
                 }
                 Err(error) => {
-                    state.status = format!("Config read error: {error}");
+                    state.status = format!("配置读取失败：{error}");
                     ConfigSnapshot::default()
                 }
             }
@@ -1066,6 +1066,23 @@ impl App {
     fn proxies(&self, frame: &mut Frame, area: Rect) {
         let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(area);
+        if self.state.proxies.is_empty() {
+            let (message, color) = if self.refresh_in_flight
+                || self.state.status == "正在连接 Mihomo..."
+                || self.state.status == "正在刷新代理列表..."
+            {
+                ("正在加载代理组...", Color::Cyan)
+            } else if self.state.status.starts_with("API 错误：") {
+                ("无法连接 Mihomo 控制器", Color::Red)
+            } else if self.client.is_none() {
+                ("未连接 Mihomo 控制器", Color::Yellow)
+            } else {
+                ("没有可选择的代理组", Color::Gray)
+            };
+            draw_empty_panel(frame, columns[0], " 代理组 ", message, color);
+            draw_empty_panel(frame, columns[1], " 节点 ", "暂无节点", Color::DarkGray);
+            return;
+        }
         let rows: Vec<Row> = self
             .state
             .proxies
@@ -1323,6 +1340,17 @@ impl App {
                 ])
             })
             .collect();
+        if rows.is_empty() {
+            let (message, color) = if self.state.status.starts_with("配置读取失败：") {
+                ("配置读取失败", Color::Red)
+            } else if self.config_path.is_none() {
+                ("未发现 Mihomo 配置文件", Color::Yellow)
+            } else {
+                ("尚未配置代理订阅", Color::Gray)
+            };
+            draw_empty_panel(frame, area, " 代理订阅 ", message, color);
+            return;
+        }
         let table = Table::new(
             rows,
             [
@@ -1338,7 +1366,7 @@ impl App {
                 .style(Style::default().fg(Color::Yellow)),
         )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .block(Block::bordered().title(" 代理订阅（a 新增，e 改址，r 刷新） "));
+        .block(Block::bordered().title(" 代理订阅 "));
         frame.render_stateful_widget(
             table,
             area,
@@ -1414,6 +1442,29 @@ impl App {
             input_area,
         );
     }
+}
+
+fn draw_empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str, color: Color) {
+    let block = Block::bordered().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let message_height = u16::try_from(message.lines().count())
+        .unwrap_or(u16::MAX)
+        .min(inner.height);
+    let message_area = Rect::new(
+        inner.x,
+        inner
+            .y
+            .saturating_add(inner.height.saturating_sub(message_height) / 2),
+        inner.width,
+        message_height,
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(color)),
+        message_area,
+    );
 }
 
 fn reload_mihomo_service() -> Result<(), String> {
@@ -1645,6 +1696,72 @@ mod tests {
         assert!(app.state.proxies.is_empty());
         assert!(app.state.rules.rules.is_empty());
         assert_eq!(app.state.controller, "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn empty_proxy_view_distinguishes_loading_failure_and_no_groups() {
+        let mut app = App::new(Some("http://127.0.0.1:9090".into()), None, None);
+        app.state.page = Page::Proxies;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal.backend().to_string().contains("正在加载代理组"));
+
+        app.state.status = "API 错误：connection refused".into();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("无法连接 Mihomo 控制器"), "{screen}");
+
+        app.state.status = "已连接，代理列表已刷新".into();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("没有可选择的代理组"), "{screen}");
+    }
+
+    #[test]
+    fn empty_provider_view_explains_why_no_subscriptions_are_visible() {
+        let mut no_config = App::new(Some("http://127.0.0.1:9090".into()), None, None);
+        no_config.state.page = Page::Config;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| no_config.draw(frame)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .to_string()
+                .contains("未发现 Mihomo 配置文件")
+        );
+
+        let (directory, path) = provider_test_config("provider-empty-state");
+        let mut empty_config = App::new(None, None, Some(path));
+        empty_config.state.page = Page::Config;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| empty_config.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("尚未配置代理订阅"), "{screen}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_read_failures_are_localized_and_visible_in_the_provider_view() {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing = std::env::temp_dir().join(format!(
+            "mihomo-tui-missing-config-{}-{unique}.yaml",
+            std::process::id()
+        ));
+        let mut app = App::new(None, None, Some(missing));
+        app.state.page = Page::Config;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("配置读取失败"));
+        assert!(app.state.status.starts_with("配置读取失败："));
     }
 
     #[test]
