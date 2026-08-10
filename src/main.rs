@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod core;
 mod dialogs;
 mod discovery;
 mod mihomo;

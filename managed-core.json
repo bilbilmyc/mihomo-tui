@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "repository": "MetaCubeX/mihomo",
+  "recommended": "v1.19.29",
+  "minimum_supported": "v1.19.28",
+  "maximum_exclusive": "v1.20.0",
+  "packages": [
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "asset": "mihomo-linux-amd64-v1-v1.19.29.deb",
+      "sha256": "6919c50b403a60c3956d07e776c06e1b11bd466e6b05341c1605ce450f79a591",
+      "deb_arch": "amd64",
+      "deb_version": "1.19.29"
+    },
+    {
+      "os": "linux",
+      "arch": "aarch64",
+      "asset": "mihomo-linux-arm64-v1.19.29.deb",
+      "sha256": "a14e694a2bac6ca3848e05f4ef27596c5982dab812c23743823e7e5c35f7cfc9",
+      "deb_arch": "arm64",
+      "deb_version": "1.19.29"
+    }
+  ]
+}

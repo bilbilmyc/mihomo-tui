@@ -1,3 +1,4 @@
+use crate::core::{CorePackage, CoreRelease, CoreVersion};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -10,8 +11,6 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-const MIHOMO_VERSION: &str = "v1.19.29";
-const MIHOMO_DEB_VERSION: &str = "1.19.29";
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 const BINARY_PATHS: [&str; 2] = ["/usr/bin/mihomo", "/usr/local/bin/mihomo"];
 const UNIT_PATHS: [&str; 3] = [
@@ -42,13 +41,6 @@ pub enum Action {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Package {
-    asset: &'static str,
-    sha256: &'static str,
-    deb_arch: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitExpectation {
     Absent,
     Packaged,
@@ -63,6 +55,12 @@ struct SystemdUnitState {
 
 struct RuntimeLock {
     _file: File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionRequirement {
+    Supported,
+    Recommended,
 }
 
 pub fn plan(mode: RuntimeMode, inventory: Inventory, auto_install: bool) -> Action {
@@ -137,7 +135,47 @@ fn acquire_runtime_lock() -> Result<RuntimeLock, String> {
 
 fn prepare_existing_for_apply() -> Result<(), String> {
     validate_existing_install()?;
+    validate_installed_core(VersionRequirement::Supported)?;
     validate_systemd_unit(UnitExpectation::Packaged)
+}
+
+fn validate_installed_core(requirement: VersionRequirement) -> Result<CoreVersion, String> {
+    let binary = mihomo_binary_path()
+        .ok_or_else(|| "未在受信任路径中找到 Mihomo（/usr/bin 或 /usr/local/bin）".to_string())?;
+    validate_installed_core_at(&binary, requirement)
+}
+
+fn validate_installed_core_at(
+    binary: &Path,
+    requirement: VersionRequirement,
+) -> Result<CoreVersion, String> {
+    let output = clean_command(binary)
+        .arg("-v")
+        .output()
+        .map_err(|error| format!("无法检查 Mihomo 版本：{error}"))?;
+    let output = checked_output("mihomo -v", output)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| "Mihomo 版本信息不是有效 UTF-8".to_string())?;
+    validate_installed_version_output(&stdout, requirement)
+}
+
+fn validate_installed_version_output(
+    output: &str,
+    requirement: VersionRequirement,
+) -> Result<CoreVersion, String> {
+    let release = CoreRelease::embedded()?;
+    let version = CoreVersion::from_mihomo_output(output)?;
+    match requirement {
+        VersionRequirement::Supported => release.require_supported(version)?,
+        VersionRequirement::Recommended if version != release.recommended() => {
+            return Err(format!(
+                "安装后的 Mihomo 版本不匹配：期望 {}，实际 {version}",
+                release.recommended()
+            ));
+        }
+        VersionRequirement::Recommended => {}
+    }
+    Ok(version)
 }
 
 pub fn reload_service() -> Result<(), String> {
@@ -469,41 +507,22 @@ fn install_for_apply() -> Result<(), String> {
     ensure_systemd()?;
     ensure_debian_host()?;
     validate_systemd_unit(UnitExpectation::Absent)?;
-    let package = package_for(std::env::consts::OS, std::env::consts::ARCH)?;
-    eprintln!("未检测到 Mihomo，正在下载官方 {MIHOMO_VERSION} 安装包...");
-    let artifact = download_package(package)?;
+    let release = CoreRelease::embedded()?;
+    let package = release.package_for(std::env::consts::OS, std::env::consts::ARCH)?;
+    eprintln!(
+        "未检测到 Mihomo，正在下载官方 {} 安装包...",
+        release.recommended()
+    );
+    let artifact = download_package(&release, package)?;
     eprintln!("安装包校验通过，正在安装 Mihomo 服务...");
     install_deb(&artifact.path)?;
     verify_installed_version()?;
     daemon_reload()?;
-    eprintln!("Mihomo {MIHOMO_VERSION} 已安装，正在加载唯一配置。");
+    eprintln!(
+        "Mihomo {} 已安装，正在加载唯一配置。",
+        release.recommended()
+    );
     Ok(())
-}
-
-fn package_for(os: &str, arch: &str) -> Result<Package, String> {
-    if os != "linux" {
-        return Err(format!("不支持在 {os} 上自动安装 Mihomo"));
-    }
-    match arch {
-        "x86_64" => Ok(Package {
-            asset: "mihomo-linux-amd64-v1-v1.19.29.deb",
-            sha256: "6919c50b403a60c3956d07e776c06e1b11bd466e6b05341c1605ce450f79a591",
-            deb_arch: "amd64",
-        }),
-        "aarch64" => Ok(Package {
-            asset: "mihomo-linux-arm64-v1.19.29.deb",
-            sha256: "a14e694a2bac6ca3848e05f4ef27596c5982dab812c23743823e7e5c35f7cfc9",
-            deb_arch: "arm64",
-        }),
-        _ => Err(format!("不支持为 {arch} 自动选择 Mihomo 安装包")),
-    }
-}
-
-fn package_url(package: Package) -> String {
-    format!(
-        "https://github.com/MetaCubeX/mihomo/releases/download/{MIHOMO_VERSION}/{}",
-        package.asset
-    )
 }
 
 fn allowed_release_url(url: &reqwest::Url) -> bool {
@@ -581,7 +600,7 @@ fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(encoded)
 }
 
-fn download_package(package: Package) -> Result<TempArtifact, String> {
+fn download_package(release: &CoreRelease, package: &CorePackage) -> Result<TempArtifact, String> {
     let policy = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 5 {
             attempt.error("Mihomo 安装包重定向次数过多")
@@ -599,7 +618,7 @@ fn download_package(package: Package) -> Result<TempArtifact, String> {
         .build()
         .map_err(|error| format!("无法创建下载客户端：{error}"))?;
     let mut response = client
-        .get(package_url(package))
+        .get(release.package_url(package))
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("下载 Mihomo 安装包失败：{error}"))?;
@@ -612,7 +631,7 @@ fn download_package(package: Package) -> Result<TempArtifact, String> {
         ));
     }
     let (artifact, mut file) = TempArtifact::create("deb")?;
-    copy_verified(&mut response, &mut file, MAX_PACKAGE_BYTES, package.sha256)?;
+    copy_verified(&mut response, &mut file, MAX_PACKAGE_BYTES, &package.sha256)?;
     file.sync_all()
         .map_err(|error| format!("无法同步临时安装包：{error}"))?;
     drop(file);
@@ -620,7 +639,7 @@ fn download_package(package: Package) -> Result<TempArtifact, String> {
     Ok(artifact)
 }
 
-fn validate_deb_file(path: &Path, package: Package) -> Result<(), String> {
+fn validate_deb_file(path: &Path, package: &CorePackage) -> Result<(), String> {
     let dpkg_deb = Path::new("/usr/bin/dpkg-deb");
     if !trusted_root_file(dpkg_deb) {
         return Err("找不到受信任的 /usr/bin/dpkg-deb".into());
@@ -665,19 +684,7 @@ fn verify_installed_version() -> Result<(), String> {
     if !trusted_root_file(binary) {
         return Err("安装完成后未找到受信任的 /usr/bin/mihomo".into());
     }
-    let output = clean_command(binary)
-        .arg("-v")
-        .output()
-        .map_err(|error| format!("无法检查 Mihomo 版本：{error}"))?;
-    let output = checked_output("mihomo -v", output)?;
-    let version = String::from_utf8_lossy(&output.stdout);
-    if !version.contains(MIHOMO_VERSION) {
-        return Err(format!(
-            "安装后的 Mihomo 版本不匹配：期望 {MIHOMO_VERSION}，实际 {}",
-            version.trim()
-        ));
-    }
-    Ok(())
+    validate_installed_core_at(binary, VersionRequirement::Recommended).map(|_| ())
 }
 
 fn daemon_reload() -> Result<(), String> {
@@ -686,7 +693,7 @@ fn daemon_reload() -> Result<(), String> {
     checked_output("systemctl daemon-reload", output).map(|_| ())
 }
 
-fn validate_deb_metadata(metadata: &str, package: Package) -> Result<(), String> {
+fn validate_deb_metadata(metadata: &str, package: &CorePackage) -> Result<(), String> {
     let field = |name: &str| {
         metadata.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
@@ -695,8 +702,8 @@ fn validate_deb_metadata(metadata: &str, package: Package) -> Result<(), String>
     };
     let expected = [
         ("Package", "mihomo"),
-        ("Version", MIHOMO_DEB_VERSION),
-        ("Architecture", package.deb_arch),
+        ("Version", package.deb_version.as_str()),
+        ("Architecture", package.deb_arch.as_str()),
     ];
     for (name, expected_value) in expected {
         let actual = field(name).ok_or_else(|| format!("安装包缺少 {name} 元数据"))?;
@@ -749,6 +756,41 @@ fn copy_verified(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_runtime_accepts_only_tested_core_versions() {
+        for version in ["v1.19.28", "v1.19.29"] {
+            let output = format!("Mihomo Meta {version} linux amd64 with go1.26.5");
+            assert!(
+                validate_installed_version_output(&output, VersionRequirement::Supported).is_ok()
+            );
+        }
+
+        for version in ["v1.19.27", "v1.20.0"] {
+            let output = format!("Mihomo Meta {version} linux amd64 with go1.26.5");
+            assert!(
+                validate_installed_version_output(&output, VersionRequirement::Supported).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn newly_installed_core_must_match_the_recommended_version() {
+        assert!(
+            validate_installed_version_output(
+                "Mihomo Meta v1.19.29 linux amd64",
+                VersionRequirement::Recommended,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_installed_version_output(
+                "Mihomo Meta v1.19.28 linux amd64",
+                VersionRequirement::Recommended,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn external_controller_never_manages_the_local_runtime() {
@@ -820,21 +862,22 @@ mod tests {
 
     #[test]
     fn supported_debian_architectures_use_pinned_packages() {
-        let amd64 = package_for("linux", "x86_64").unwrap();
+        let release = CoreRelease::embedded().unwrap();
+        let amd64 = release.package_for("linux", "x86_64").unwrap();
         assert_eq!(amd64.asset, "mihomo-linux-amd64-v1-v1.19.29.deb");
         assert_eq!(
             amd64.sha256,
             "6919c50b403a60c3956d07e776c06e1b11bd466e6b05341c1605ce450f79a591"
         );
 
-        let arm64 = package_for("linux", "aarch64").unwrap();
+        let arm64 = release.package_for("linux", "aarch64").unwrap();
         assert_eq!(arm64.asset, "mihomo-linux-arm64-v1.19.29.deb");
         assert_eq!(
             arm64.sha256,
             "a14e694a2bac6ca3848e05f4ef27596c5982dab812c23743823e7e5c35f7cfc9"
         );
-        assert!(package_for("linux", "mips").is_err());
-        assert!(package_for("macos", "x86_64").is_err());
+        assert!(release.package_for("linux", "mips").is_err());
+        assert!(release.package_for("macos", "x86_64").is_err());
     }
 
     #[test]
@@ -870,7 +913,8 @@ mod tests {
 
     #[test]
     fn deb_metadata_must_match_the_pinned_package() {
-        let package = package_for("linux", "x86_64").unwrap();
+        let release = CoreRelease::embedded().unwrap();
+        let package = release.package_for("linux", "x86_64").unwrap();
         validate_deb_metadata(
             "Package: mihomo\nVersion: 1.19.29\nArchitecture: amd64\n",
             package,
@@ -895,9 +939,10 @@ mod tests {
 
     #[test]
     fn download_url_and_redirects_are_restricted_to_github_release_hosts() {
-        let package = package_for("linux", "x86_64").unwrap();
+        let release = CoreRelease::embedded().unwrap();
+        let package = release.package_for("linux", "x86_64").unwrap();
         assert_eq!(
-            package_url(package),
+            release.package_url(package),
             "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.29/mihomo-linux-amd64-v1-v1.19.29.deb"
         );
 
