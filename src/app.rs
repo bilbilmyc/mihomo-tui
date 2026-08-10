@@ -1116,7 +1116,9 @@ impl App {
             )),
             ListItem::new(format!(
                 "核心加载   {}",
-                if self.reload_pending {
+                if self.config_reload == ConfigReload::None {
+                    "外部管理"
+                } else if self.reload_pending {
                     "待重载（按 p）"
                 } else {
                     "已加载当前配置"
@@ -1922,6 +1924,18 @@ mod tests {
         assert!(!screen.contains("运行配置"), "{screen}");
         assert!(screen.contains("核心加载"), "{screen}");
         assert!(screen.contains("待重载"), "{screen}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dashboard_labels_external_core_management() {
+        let (directory, source, _) = workspace_test_config("dashboard-external");
+        let app = App::with_workspace(None, None, Some(source), ConfigReload::None, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(terminal.backend().to_string().contains("外部管理"));
         fs::remove_dir_all(directory).unwrap();
     }
 
