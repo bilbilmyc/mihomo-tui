@@ -31,6 +31,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 sudo ./target/release/mihomo-tui
+./target/release/mihomo-tui core status
+sudo ./target/release/mihomo-tui core upgrade
 ```
 
 ## Project Structure
@@ -38,6 +40,9 @@ sudo ./target/release/mihomo-tui
 ```text
 managed-core.json       Embedded, reviewable official-core release contract
 src/core.rs             Manifest parsing, validation, version parsing, compatibility policy
+src/system.rs           Trusted root files, sanitized commands, and private temporary paths
+src/core_package.rs     Official package download, integrity checks, metadata, and extraction
+src/core_manager.rs     Versioned layout, status, activation, health checks, and rollback
 src/runtime.rs          Privileged installation and systemd lifecycle orchestration
 src/mihomo.rs           External Controller API boundary
 docs/managed-core.md    Architecture, security boundaries, and delivery phases
@@ -112,28 +117,72 @@ Never:
 
 ### Phase 2: Explicit Staged Upgrade
 
-- Add a separate explicit upgrade command or TUI confirmation flow.
-- Download and validate the candidate without replacing the active binary.
-- Validate the owned config with the candidate, activate atomically, restart, and check `/version`
-  and `/proxies`.
-- Restore the previous core automatically when activation or health checks fail.
+- `mihomo-tui core status` reports the installed, active, recommended, and compatible versions without
+  changing the host.
+- `sudo mihomo-tui core upgrade` is the only upgrade entry point. Normal startup and `p` never invoke
+  it.
+- Managed binaries live at `/usr/lib/mihomo-tui/cores/<version>/mihomo`. The root-owned
+  `/usr/lib/mihomo-tui/current` symlink selects one immutable version directory.
+- The systemd drop-in starts `/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui`.
+- Upgrade downloads and verifies the official deb, extracts only its Mihomo binary into a private
+  staging directory, verifies its exact version, and validates the owned config with that candidate.
+- Before first activation, the current trusted binary is copied into its own version directory so it
+  is always available for rollback.
+- Activation atomically replaces the `current` symlink, reloads systemd, restarts the service, then
+  checks `/version` and `/proxies` through the controller discovered from the owned config.
+- Any activation, restart, version, or proxy health failure atomically restores the previous symlink,
+  restarts the previous core, verifies rollback health, and returns an error describing both failures
+  when rollback is also unhealthy.
+- A successful upgrade retains the previous core for manual rollback and removes unrelated staging
+  files. Re-running upgrade at the recommended version is an idempotent no-op.
 
 ### Phase 3: Release Synchronization
 
-- Detect new official Mihomo releases in CI.
-- Generate a manifest-update pull request with package metadata and hashes.
+- Detect the latest published, non-draft, non-prerelease Mihomo release through GitHub's documented
+  `GET /repos/MetaCubeX/mihomo/releases/latest` endpoint.
+- Generate a manifest-update branch and pull request with package metadata and hashes. The workflow
+  receives only `contents: write` and `pull-requests: write` permissions.
 - Run the architecture build matrix and disposable-host integration tests.
 - Require human approval before publishing a new paired `mihomo-tui` release.
+- Patch releases inside the existing compatibility range can be proposed automatically. A release
+  outside that range fails closed and requires a reviewed compatibility-policy change.
 
 ### Phase 4: Bundled Distribution
 
-- Publish checksummed Debian/Ubuntu artifacts containing `mihomo-tui`, the tested official core, the
-  service definition, license notices, and install/uninstall scripts.
+- Build Debian packages with `dpkg-deb --build --root-owner-group`. The package contains
+  `mihomo-tui`, the tested official core under the versioned layout, the `mihomo.service` unit, the
+  default `current` link, license/source notices, and maintainer scripts.
+- The bundle conflicts with a separately packaged `mihomo` because both would own the same service;
+  users must explicitly choose bundled or externally managed mode.
+- Publish SHA-256 checksums for every architecture artifact.
 - Keep external mode available for users who manage Mihomo separately.
+
+## Upgrade Transaction
+
+```text
+lock -> inspect current -> download -> hash/deb checks -> extract candidate
+     -> candidate version/config checks -> stage immutable version
+     -> atomically switch current -> daemon-reload -> restart -> API health
+     -> success: retain old version
+     -> failure: atomically switch old current -> restart -> rollback health
+```
+
+Every path before the atomic link switch is side-effect free outside private staging and an optional
+new immutable version directory. The active service is never stopped merely to download or inspect a
+candidate.
+
+## Authoritative Sources
+
+- GitHub latest release API: <https://docs.github.com/en/rest/releases/releases#get-the-latest-release>
+- GitHub Actions workflow syntax and permissions:
+  <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax>
+- GitHub CLI pull-request creation: <https://cli.github.com/manual/gh_pr_create>
+- Debian archive operations use the installed `dpkg-deb` interface (`--field`, `--extract`, and
+  `--build --root-owner-group`) and verify its availability as a trusted root executable.
 
 ## Success Criteria
 
-Phase 1 is complete when:
+All phases are complete when:
 
 - one manifest is the only source of recommended version, compatible range, package names, package
   versions, architectures, and hashes;
@@ -142,11 +191,14 @@ Phase 1 is complete when:
 - local apply accepts tested versions and rejects too-old or untested-newer versions with actionable
   errors;
 - external mode and clean-host install behavior remain unchanged;
+- upgrade is explicit, staged, health-checked, idempotent, and rollback-tested;
+- upstream synchronization creates reviewable PRs and cannot widen compatibility automatically;
+- both supported architecture packages build, contain the expected files, pass metadata inspection,
+  and publish checksums;
 - all verification commands pass without changing the running host service.
 
-## Open Questions
+## Release Gate
 
-- The exact CLI/TUI confirmation design for Phase 2 will be specified before upgrade code is added.
-- The final filesystem layout for bundled cores will be decided together with Debian packaging.
-- License notices and source-offer requirements will be verified against the Mihomo version bundled
-  by each release.
+No bundle is published until the bundled Mihomo license text and corresponding source URL are present,
+the disposable-host upgrade and rollback test passes, and a human approves the release PR. Absence of
+license material, source information, rollback evidence, or architecture coverage blocks release.
