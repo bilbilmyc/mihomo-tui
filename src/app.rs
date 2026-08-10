@@ -365,7 +365,13 @@ impl App {
                     self.refresh_in_flight = false;
                     match result {
                         Ok(proxies) => apply_proxy_refresh(&mut self.state, proxies),
-                        Err(error) => self.state.status = format!("API 错误：{error}"),
+                        Err(error) => {
+                            self.state.status = if self.config_pending {
+                                format!("API 错误：{error}；独立配置待应用（按 p）")
+                            } else {
+                                format!("API 错误：{error}")
+                            }
+                        }
                     }
                 }
                 WorkerResult::ProxySelected {
@@ -936,6 +942,10 @@ impl App {
             self.state.status = "本地应用不可用：未配置运行时目标".into();
             return;
         };
+        if !self.config_pending {
+            self.state.status = "独立配置已经应用，无需重复操作".into();
+            return;
+        }
         self.apply_in_flight = true;
         self.state.status = "正在校验并应用独立配置...".into();
         let sender = self.worker_tx.clone();
@@ -1989,6 +1999,26 @@ mod tests {
 
         assert_eq!(app.provider_refresh_in_flight, 0);
         assert!(app.state.status.contains("先按 p 应用"));
+    }
+
+    #[test]
+    fn apply_key_does_not_reload_an_already_applied_config() {
+        let (directory, source, target) = workspace_test_config("already-applied");
+        let mut app = App::with_workspace(
+            None,
+            None,
+            Some(source),
+            Some(target),
+            ConfigReload::LocalSystemd,
+            false,
+        );
+        assert!(!app.config_pending);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        assert!(!app.apply_in_flight);
+        assert!(app.state.status.contains("无需重复"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -21,7 +21,13 @@ pub enum Initialization {
 }
 
 pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization, String> {
-    if fs::symlink_metadata(source).is_ok() {
+    if let Ok(metadata) = fs::symlink_metadata(source) {
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "独立配置 {} 必须是普通文件，不能是符号链接",
+                source.display()
+            ));
+        }
         read_workspace_document(source)?;
         restrict_source_permissions(source)?;
         return Ok(Initialization::Existing);
@@ -173,6 +179,14 @@ fn create_source(path: &Path, content: &[u8]) -> Result<(), String> {
     let parent_existed = fs::symlink_metadata(parent).is_ok();
     fs::create_dir_all(parent)
         .map_err(|error| format!("无法创建独立配置目录 {}：{error}", parent.display()))?;
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|error| format!("无法检查独立配置目录 {}：{error}", parent.display()))?;
+    if !parent_metadata.file_type().is_dir() {
+        return Err(format!(
+            "独立配置目录 {} 必须是普通目录，不能是符号链接",
+            parent.display()
+        ));
+    }
     #[cfg(unix)]
     if !parent_existed {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
@@ -349,5 +363,25 @@ profile:
         let error = initialize(&source, None).unwrap_err();
 
         assert!(error.contains("mihomo-tui/v2"), "unexpected error: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlink_as_the_workspace_source() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("source-symlink");
+        let target = directory.join("target.yaml");
+        let source = directory.join("config.yaml");
+        fs::write(
+            &target,
+            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile: {}\n",
+        )
+        .unwrap();
+        symlink(&target, &source).unwrap();
+
+        let error = initialize(&source, None).unwrap_err();
+
+        assert!(error.contains("符号链接"), "unexpected error: {error}");
     }
 }
