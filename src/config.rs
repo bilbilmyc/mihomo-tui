@@ -55,6 +55,17 @@ profile:
     }
 
     #[test]
+    fn a_legacy_custom_kind_field_is_not_mistaken_for_a_workspace_wrapper() {
+        let snapshot = super::parse_config(
+            "kind: custom-backend-metadata\nmixed-port: 17890\nrules: ['MATCH,DIRECT']\n",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.mixed_port, Some(17890));
+        assert_eq!(snapshot.rules.len(), 1);
+    }
+
+    #[test]
     fn parses_editable_tun_and_dns_settings() {
         let snapshot = super::parse_config(
             r#"

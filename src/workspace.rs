@@ -76,7 +76,7 @@ pub fn config_profile(document: &Value) -> Result<&Value, String> {
     let root = document
         .as_mapping()
         .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
-    if root.contains_key(Value::String("kind".into())) {
+    if has_workspace_kind(root) {
         workspace_profile(document)
     } else {
         Ok(document)
@@ -84,10 +84,11 @@ pub fn config_profile(document: &Value) -> Result<&Value, String> {
 }
 
 pub fn config_profile_mut(document: &mut Value) -> Result<&mut Value, String> {
-    let wrapped = document
-        .as_mapping()
-        .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?
-        .contains_key(Value::String("kind".into()));
+    let wrapped = has_workspace_kind(
+        document
+            .as_mapping()
+            .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?,
+    );
     if !wrapped {
         return Ok(document);
     }
@@ -96,6 +97,12 @@ pub fn config_profile_mut(document: &mut Value) -> Result<&mut Value, String> {
         .as_mapping_mut()
         .and_then(|root| root.get_mut(Value::String("profile".into())))
         .ok_or_else(|| "独立配置缺少 profile".to_string())
+}
+
+fn has_workspace_kind(root: &Mapping) -> bool {
+    root.get(Value::String("kind".into()))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("mihomo-tui/"))
 }
 
 fn read_raw_profile(path: &Path) -> Result<Value, String> {

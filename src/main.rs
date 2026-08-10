@@ -103,7 +103,7 @@ fn render_fatal_error(error: impl Display) -> String {
 }
 
 fn apply_policy(controller_was_explicit: bool, config_was_explicit: bool) -> ConfigReload {
-    if controller_was_explicit && !config_was_explicit {
+    if controller_was_explicit || config_was_explicit {
         ConfigReload::None
     } else {
         ConfigReload::LocalSystemd
@@ -115,15 +115,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_remote_controller_disables_local_apply_without_a_target() {
+    fn explicit_controller_or_config_never_manages_the_local_service() {
         assert_eq!(apply_policy(true, false), ConfigReload::None);
+        assert_eq!(apply_policy(false, true), ConfigReload::None);
+        assert_eq!(apply_policy(true, true), ConfigReload::None);
     }
 
     #[test]
-    fn default_or_explicit_runtime_target_enables_local_apply() {
+    fn default_runtime_target_enables_local_apply() {
         assert_eq!(apply_policy(false, false), ConfigReload::LocalSystemd);
-        assert_eq!(apply_policy(false, true), ConfigReload::LocalSystemd);
-        assert_eq!(apply_policy(true, true), ConfigReload::LocalSystemd);
     }
 
     #[test]

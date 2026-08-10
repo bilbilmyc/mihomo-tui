@@ -54,8 +54,8 @@ pub struct Inventory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    Start,
-    InstallAndStart,
+    Prepare,
+    Install,
     RejectPartialInstall,
 }
 
@@ -71,13 +71,6 @@ enum ConfigState {
     Ready,
     VendorDefault,
     Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServiceAction {
-    None,
-    ReloadOrRestart,
-    EnableAndStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +96,8 @@ pub fn plan(mode: RuntimeMode, inventory: Inventory, auto_install: bool) -> Acti
         return Action::None;
     }
     match (inventory.binary, inventory.unit, inventory.config) {
-        (true, true, true) => Action::Start,
-        (false, false, false) if auto_install => Action::InstallAndStart,
+        (true, true, true) => Action::Prepare,
+        (false, false, false) if auto_install => Action::Install,
         (false, false, false) => Action::None,
         _ => Action::RejectPartialInstall,
     }
@@ -118,7 +111,7 @@ pub fn ensure(mode: RuntimeMode, auto_install: bool) -> Result<(), String> {
     match plan(mode, inventory, auto_install) {
         Action::None => Ok(()),
         Action::RejectPartialInstall => Err(partial_install_error(inventory)),
-        Action::Start | Action::InstallAndStart => {
+        Action::Prepare | Action::Install => {
             if !effective_root() {
                 return Err(root_required_message().into());
             }
@@ -126,8 +119,8 @@ pub fn ensure(mode: RuntimeMode, auto_install: bool) -> Result<(), String> {
             let inventory = inspect();
             match plan(mode, inventory, auto_install) {
                 Action::None => Ok(()),
-                Action::Start => resume_or_start(),
-                Action::InstallAndStart => install_and_start(),
+                Action::Prepare => prepare_existing_for_apply(),
+                Action::Install => install_for_apply(),
                 Action::RejectPartialInstall => Err(partial_install_error(inventory)),
             }
         }
@@ -168,15 +161,14 @@ fn acquire_runtime_lock() -> Result<RuntimeLock, String> {
     Ok(RuntimeLock { _file: file })
 }
 
-fn resume_or_start() -> Result<(), String> {
+fn prepare_existing_for_apply() -> Result<(), String> {
     validate_existing_install()?;
     validate_systemd_unit(UnitExpectation::PackagedOrAbsent)?;
-    let config_changed = match system_config_state()? {
-        ConfigState::Ready => false,
+    match system_config_state()? {
+        ConfigState::Ready => {}
         ConfigState::VendorDefault => {
             eprintln!("检测到尚未完成的 Mihomo 默认配置，正在继续初始化...");
             configure_installed_default()?;
-            true
         }
         ConfigState::Unsupported => {
             return Err(
@@ -184,9 +176,8 @@ fn resume_or_start() -> Result<(), String> {
                     .into(),
             );
         }
-    };
-    daemon_reload()?;
-    start_service(config_changed)
+    }
+    daemon_reload()
 }
 
 pub fn reload_service() -> Result<(), String> {
@@ -414,37 +405,6 @@ fn ensure_systemd() -> Result<(), String> {
     Ok(())
 }
 
-fn service_action(active: bool, config_changed: bool) -> ServiceAction {
-    match (active, config_changed) {
-        (true, true) => ServiceAction::ReloadOrRestart,
-        (true, false) => ServiceAction::None,
-        (false, _) => ServiceAction::EnableAndStart,
-    }
-}
-
-fn start_service(config_changed: bool) -> Result<(), String> {
-    ensure_systemd()?;
-    validate_systemd_unit(UnitExpectation::Packaged)?;
-    let systemctl = systemctl_path()?;
-    let active = clean_command(&systemctl)
-        .args(["is-active", "--quiet", "mihomo.service"])
-        .status()
-        .map_err(|error| format!("无法检查 Mihomo 服务状态：{error}"))?;
-    let (action, args) = match service_action(active.success(), config_changed) {
-        ServiceAction::None => return Ok(()),
-        ServiceAction::ReloadOrRestart => (
-            "systemctl reload-or-restart mihomo.service",
-            ["reload-or-restart", "mihomo.service"].as_slice(),
-        ),
-        ServiceAction::EnableAndStart => (
-            "systemctl enable --now mihomo.service",
-            ["enable", "--now", "mihomo.service"].as_slice(),
-        ),
-    };
-    let output = run_privileged(&systemctl, args)?;
-    checked_output(action, output).map(|_| ())
-}
-
 fn clean_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command
@@ -493,7 +453,7 @@ fn checked_output(action: &str, output: Output) -> Result<Output, String> {
     Err(format!("{action} 失败（{}）：{detail}", output.status))
 }
 
-fn install_and_start() -> Result<(), String> {
+fn install_for_apply() -> Result<(), String> {
     ensure_systemd()?;
     ensure_debian_host()?;
     validate_systemd_unit(UnitExpectation::Absent)?;
@@ -505,8 +465,7 @@ fn install_and_start() -> Result<(), String> {
     verify_installed_version()?;
     configure_installed_default()?;
     daemon_reload()?;
-    start_service(true)?;
-    eprintln!("Mihomo {MIHOMO_VERSION} 已安装并启动。");
+    eprintln!("Mihomo {MIHOMO_VERSION} 已安装，正在应用独立配置。");
     Ok(())
 }
 
@@ -869,7 +828,7 @@ mod tests {
 
         assert_eq!(
             plan(RuntimeMode::ManagedLocal, inventory, true),
-            Action::InstallAndStart
+            Action::Install
         );
     }
 
@@ -888,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_local_install_is_started_without_downloading() {
+    fn complete_local_install_is_prepared_without_downloading() {
         let inventory = Inventory {
             binary: true,
             unit: true,
@@ -897,7 +856,7 @@ mod tests {
 
         assert_eq!(
             plan(RuntimeMode::ManagedLocal, inventory, true),
-            Action::Start
+            Action::Prepare
         );
     }
 
@@ -1079,13 +1038,6 @@ rules:
 
         assert!(!trusted_root_file(&path));
         fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn changed_config_reloads_an_already_active_service() {
-        assert_eq!(service_action(true, true), ServiceAction::ReloadOrRestart);
-        assert_eq!(service_action(true, false), ServiceAction::None);
-        assert_eq!(service_action(false, true), ServiceAction::EnableAndStart);
     }
 
     #[test]
