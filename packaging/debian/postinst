@@ -5,9 +5,62 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 default_core='@CORE_TAG@'
-current=/usr/lib/mihomo-tui/current
+managed_root=/usr/lib/mihomo-tui
+bundled_root=$managed_root/bundled
+bundled_version_root=$bundled_root/$default_core
+bundled_core=$bundled_version_root/mihomo
+cores_root=$managed_root/cores
+version_root=$cores_root/$default_core
+managed_core=$version_root/mihomo
+current=$managed_root/current
+
+safe_mode() {
+    mode=$(stat -c %a "$1") || return 1
+    [ $((0$mode & 022)) -eq 0 ]
+}
+
+trusted_directory() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] && safe_mode "$1"
+}
+
+trusted_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] && safe_mode "$1"
+}
+
+for directory in "$managed_root" "$bundled_root" "$bundled_version_root"; do
+    trusted_directory "$directory" || {
+        echo "mihomo-tui: bundled core directory is unsafe: $directory" >&2
+        exit 1
+    }
+done
+trusted_file "$bundled_core" || {
+    echo "mihomo-tui: bundled core is not a trusted root file" >&2
+    exit 1
+}
+for directory in "$cores_root" "$version_root"; do
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        trusted_directory "$directory" || {
+            echo "mihomo-tui: managed core directory is unsafe: $directory" >&2
+            exit 1
+        }
+    else
+        install -d -m 755 "$directory"
+    fi
+done
+if [ -e "$managed_core" ] || [ -L "$managed_core" ]; then
+    trusted_file "$managed_core" && cmp -s "$bundled_core" "$managed_core" || {
+        echo "mihomo-tui: existing managed core differs from bundled $default_core" >&2
+        exit 1
+    }
+else
+    ln "$bundled_core" "$managed_core"
+fi
+
 if [ ! -e "$current" ] && [ ! -L "$current" ]; then
     ln -s "cores/$default_core" "$current"
+elif [ ! -L "$current" ]; then
+    echo "mihomo-tui: managed current path is not a symbolic link" >&2
+    exit 1
 fi
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then

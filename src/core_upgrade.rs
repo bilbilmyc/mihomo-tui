@@ -129,12 +129,17 @@ pub fn upgrade() -> Result<String, String> {
         })?;
     let previous = prepare_previous_core(&paths, &release, active)?;
 
-    let package = release.package_for(std::env::consts::OS, std::env::consts::ARCH)?;
-    eprintln!("downloading and verifying official Mihomo {candidate_version}...");
-    let downloaded = core_package::download_package(&release, package)?;
-    let extracted = core_package::extract_core(&downloaded)?;
-    validate_candidate(extracted.candidate(), candidate_version)?;
-    install_version(&paths, extracted.candidate(), candidate_version)?;
+    if let Some(candidate) = installed_candidate(&paths, candidate_version)? {
+        eprintln!("validating bundled Mihomo {candidate_version}...");
+        validate_candidate(&candidate, candidate_version)?;
+    } else {
+        let package = release.package_for(std::env::consts::OS, std::env::consts::ARCH)?;
+        eprintln!("downloading and verifying official Mihomo {candidate_version}...");
+        let downloaded = core_package::download_package(&release, package)?;
+        let extracted = core_package::extract_core(&downloaded)?;
+        validate_candidate(extracted.candidate(), candidate_version)?;
+        install_version(&paths, extracted.candidate(), candidate_version)?;
+    }
 
     let client = MihomoClient::new(connection.controller, connection.secret)
         .map_err(|error| format!("cannot create Mihomo health client: {error}"))?;
@@ -143,6 +148,30 @@ pub fn upgrade() -> Result<String, String> {
     Ok(format!(
         "managed Mihomo core upgraded from {previous} to {candidate_version}"
     ))
+}
+
+fn installed_candidate(
+    paths: &CorePaths,
+    expected: CoreVersion,
+) -> Result<Option<PathBuf>, String> {
+    managed_active_version(paths)?;
+    let binary = paths.binary(expected);
+    match fs::symlink_metadata(&binary) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "cannot inspect installed managed core {}: {error}",
+            binary.display()
+        )),
+        Ok(_) if !trusted_root_file(&binary) => Err(format!(
+            "installed managed core {} is not a trusted root file",
+            binary.display()
+        )),
+        Ok(_) if binary_version(&binary)? != expected => Err(format!(
+            "installed managed core {} does not contain {expected}",
+            binary.display()
+        )),
+        Ok(_) => Ok(Some(binary)),
+    }
 }
 
 fn prepare_previous_core(
@@ -271,6 +300,44 @@ mod tests {
 
     fn version(value: &str) -> CoreVersion {
         CoreVersion::parse(value).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundled_candidate_is_detected_for_reuse() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Path::new("/tmp").join(format!(
+            "mihomo-tui-installed-candidate-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("mihomo");
+        fs::write(
+            &source,
+            "#!/bin/sh\nprintf 'Mihomo Meta v1.19.29 linux amd64\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = CorePaths::under(&root.join("managed"));
+        let candidate = version("v1.19.29");
+        install_version(&paths, &source, candidate).unwrap();
+
+        assert_eq!(
+            installed_candidate(&paths, candidate).unwrap(),
+            Some(paths.binary(candidate))
+        );
+        assert_eq!(
+            installed_candidate(&paths, version("v1.19.28")).unwrap(),
+            None
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

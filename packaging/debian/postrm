@@ -4,9 +4,14 @@ set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-if [ "$1" = remove ] && [ -L /usr/lib/mihomo-tui/current ]; then
-    rm -f /usr/lib/mihomo-tui/current
-    rmdir /usr/lib/mihomo-tui/cores /usr/lib/mihomo-tui 2>/dev/null || true
+if [ "$1" = remove ]; then
+    if [ -L /usr/lib/mihomo-tui/current ]; then
+        rm -f /usr/lib/mihomo-tui/current
+    fi
+    if [ -d /usr/lib/mihomo-tui/cores ] && [ ! -L /usr/lib/mihomo-tui/cores ]; then
+        rm -rf -- /usr/lib/mihomo-tui/cores
+    fi
+    rmdir /usr/lib/mihomo-tui 2>/dev/null || true
 fi
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then

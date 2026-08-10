@@ -39,10 +39,13 @@ dpkg-deb --control "$package" "$control"
 
 [[ -f $root/usr/bin/mihomo-tui && -x $root/usr/bin/mihomo-tui && ! -L $root/usr/bin/mihomo-tui ]]
 [[ ! -e $root/usr/bin/mihomo && ! -L $root/usr/bin/mihomo ]]
-core_binary="$root/usr/lib/mihomo-tui/cores/$core_tag/mihomo"
-[[ -f $core_binary && -x $core_binary && ! -L $core_binary ]]
+bundled_binary="$root/usr/lib/mihomo-tui/bundled/$core_tag/mihomo"
+[[ -f $bundled_binary && -x $bundled_binary && ! -L $bundled_binary ]]
+[[ ! -e $root/usr/lib/mihomo-tui/cores/$core_tag/mihomo ]]
 [[ ! -e $root/usr/lib/mihomo-tui/current && ! -L $root/usr/lib/mihomo-tui/current ]]
 grep -F "default_core='$core_tag'" "$control/postinst" >/dev/null
+grep -F 'bundled_root=$managed_root/bundled' "$control/postinst" >/dev/null
+grep -F 'bundled_core=$bundled_version_root/mihomo' "$control/postinst" >/dev/null
 grep -F "ExecStart=/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui" "$root/usr/lib/systemd/system/mihomo.service" >/dev/null
 grep -F "Source: https://github.com/MetaCubeX/mihomo/tree/$core_tag" "$root/usr/share/doc/mihomo-tui/Mihomo-NOTICE" >/dev/null
 actual_license_sha256=$(sha256sum "$root/usr/share/doc/mihomo-tui/Mihomo-LICENSE")
@@ -56,14 +59,14 @@ for script in postinst prerm postrm; do
   sh -n "$control/$script"
 done
 verification_unit="$temp_dir/mihomo-verify.service"
-sed "s|/usr/lib/mihomo-tui/current/mihomo|$core_binary|" \
+sed "s|/usr/lib/mihomo-tui/current/mihomo|$bundled_binary|" \
   "$root/usr/lib/systemd/system/mihomo.service" >"$verification_unit"
 SYSTEMD_UNIT_PATH="$temp_dir:/usr/lib/systemd/system:/lib/systemd/system" \
   systemd-analyze verify "$verification_unit"
 
 if [[ $(dpkg --print-architecture) == "$architecture" ]]; then
   "$root/usr/bin/mihomo-tui" --version >/dev/null
-  version_output=$("$core_binary" -v)
+  version_output=$("$bundled_binary" -v)
   core_tag_pattern=${core_tag//./\\.}
   [[ $version_output =~ (^|[[:space:]])$core_tag_pattern([[:space:]]|$) ]]
 fi
