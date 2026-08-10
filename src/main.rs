@@ -5,6 +5,7 @@ mod discovery;
 mod mihomo;
 mod models;
 mod runtime;
+mod workspace;
 
 use app::{App, ConfigReload};
 use clap::Parser;

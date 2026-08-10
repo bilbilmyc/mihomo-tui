@@ -32,6 +32,29 @@ rules:
     }
 
     #[test]
+    fn parses_the_profile_inside_an_independent_workspace() {
+        let snapshot = super::parse_config(
+            r#"
+kind: mihomo-tui/v1
+backend: mihomo
+profile:
+  mixed-port: 17890
+  mode: rule
+  proxy-providers:
+    airport:
+      type: http
+      url: https://example.com/sub
+  rules:
+    - MATCH,DIRECT
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.mixed_port, Some(17890));
+        assert_eq!(snapshot.providers[0].name, "airport");
+    }
+
+    #[test]
     fn parses_editable_tun_and_dns_settings() {
         let snapshot = super::parse_config(
             r#"
@@ -138,7 +161,7 @@ dns:
     }
 
     #[test]
-    fn saves_and_reloads_tun_and_dns_settings_through_mihomo_validation() {
+    fn saves_and_reloads_tun_and_dns_settings_offline() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -266,7 +289,7 @@ rules:
 
     #[cfg(unix)]
     #[test]
-    fn validated_write_preserves_existing_config_permissions() {
+    fn source_write_preserves_existing_raw_config_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let unique = SystemTime::now()
@@ -286,7 +309,7 @@ rules:
         )
         .unwrap();
 
-        let backup = super::write_validated(&path, &document).unwrap();
+        let backup = super::write_source(&path, &document).unwrap();
 
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -302,7 +325,7 @@ rules:
     }
 
     #[test]
-    fn validation_errors_include_mihomo_stdout_diagnostics() {
+    fn offline_source_writes_do_not_require_mihomo_semantic_validation() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -316,13 +339,131 @@ rules:
         fs::write(&path, "rules:\n  - MATCH,DIRECT\n").unwrap();
         let invalid: Value = serde_yaml::from_str("rules: [MATCH,DIRECT]\n").unwrap();
 
-        let error = super::write_validated(&path, &invalid).unwrap_err();
+        let backup = super::write_source(&path, &invalid).unwrap();
 
-        assert!(
-            error.contains("format invalid"),
-            "unexpected error: {error}"
-        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "rules:\n- MATCH\n- DIRECT\n");
+        fs::remove_file(backup).unwrap();
         fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn wrapped_source_edits_preserve_metadata_and_unknown_profile_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-wrapped-edit-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        fs::write(
+            &path,
+            r#"kind: mihomo-tui/v1
+backend: mihomo
+profile:
+  experimental:
+    custom: keep-me
+  proxy-providers: {}
+  proxy-groups: []
+  rules: [MATCH,DIRECT]
+"#,
+        )
+        .unwrap();
+
+        let backup = super::add_http_provider(
+            &path,
+            "airport",
+            "https://subscriptions.example.com/private",
+        )
+        .unwrap();
+
+        let document: Value = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["kind"], "mihomo-tui/v1");
+        assert_eq!(document["profile"]["experimental"]["custom"], "keep-me");
+        assert_eq!(
+            document["profile"]["proxy-providers"]["airport"]["url"],
+            "https://subscriptions.example.com/private"
+        );
+        fs::remove_file(backup).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_runtime_validation_leaves_the_target_unchanged() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-apply-validation-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("source.yaml");
+        let target = directory.join("target.yaml");
+        fs::write(
+            &source,
+            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: global\n  rules: [MATCH,DIRECT]\n",
+        )
+        .unwrap();
+        fs::write(&target, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
+
+        let error = super::apply_to_runtime_with(&source, &target, |_, _| {
+            Err("candidate rejected".into())
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "mode: rule\nrules: [MATCH,DIRECT]\n"
+        );
+        assert_eq!(error, "candidate rejected");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(target).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_apply_writes_only_the_profile_and_keeps_a_backup() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-apply-success-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("source.yaml");
+        let target = directory.join("target.yaml");
+        fs::write(
+            &source,
+            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: global\n  rules: [MATCH,DIRECT]\n",
+        )
+        .unwrap();
+        fs::write(&target, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
+
+        let backup = super::apply_to_runtime_with(&source, &target, |candidate, _| {
+            let content = fs::read_to_string(candidate).unwrap();
+            assert!(!content.contains("mihomo-tui/v1"));
+            Ok(())
+        })
+        .unwrap();
+
+        let applied: Value = serde_yaml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(applied["mode"], "global");
+        assert!(applied.get("kind").is_none());
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            "mode: rule\nrules: [MATCH,DIRECT]\n"
+        );
+        fs::remove_file(backup).unwrap();
+        fs::remove_file(source).unwrap();
+        fs::remove_file(target).unwrap();
         fs::remove_dir(directory).unwrap();
     }
 
@@ -604,7 +745,7 @@ pub fn load(path: &Path) -> Result<ConfigSnapshot, String> {
 pub fn save_rules(path: &Path, rules: &[ConfigRule]) -> Result<PathBuf, String> {
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
-    let root = document
+    let root = crate::workspace::config_profile_mut(&mut document)?
         .as_mapping_mut()
         .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
     let entries = rules
@@ -612,7 +753,7 @@ pub fn save_rules(path: &Path, rules: &[ConfigRule]) -> Result<PathBuf, String> 
         .map(|rule| Value::String(serialize_rule(rule)))
         .collect();
     root.insert(Value::String("rules".into()), Value::Sequence(entries));
-    write_validated(path, &document)
+    write_source(path, &document)
 }
 
 pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, String> {
@@ -634,7 +775,7 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
     }
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
-    let root = document
+    let root = crate::workspace::config_profile_mut(&mut document)?
         .as_mapping_mut()
         .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
     let providers = root
@@ -672,7 +813,7 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
         .map(str::to_string)
         .collect();
     if updating {
-        return write_validated(path, &document);
+        return write_source(path, &document);
     }
     let groups = root
         .entry(Value::String("proxy-groups".into()))
@@ -711,21 +852,21 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
         Value::Sequence(vec![Value::String("DIRECT".into())]),
     );
     groups.push(Value::Mapping(group));
-    write_validated(path, &document)
+    write_source(path, &document)
 }
 
 pub fn save_tun_settings(path: &Path, settings: &TunSettings) -> Result<PathBuf, String> {
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     apply_tun_settings(&mut document, settings)?;
-    write_validated(path, &document)
+    write_source(path, &document)
 }
 
 pub fn save_dns_settings(path: &Path, settings: &DnsSettings) -> Result<PathBuf, String> {
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     apply_dns_settings(&mut document, settings)?;
-    write_validated(path, &document)
+    write_source(path, &document)
 }
 
 fn apply_tun_settings(document: &mut Value, settings: &TunSettings) -> Result<(), String> {
@@ -774,7 +915,7 @@ fn apply_dns_settings(document: &mut Value, settings: &DnsSettings) -> Result<()
 }
 
 fn editable_section<'a>(document: &'a mut Value, name: &str) -> Result<&'a mut Mapping, String> {
-    let root = document
+    let root = crate::workspace::config_profile_mut(document)?
         .as_mapping_mut()
         .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
     root.entry(Value::String(name.into()))
@@ -821,31 +962,30 @@ fn set_string_list(section: &mut Mapping, key: &str, values: &[String]) {
     }
 }
 
-fn write_validated(path: &Path, document: &Value) -> Result<PathBuf, String> {
+fn write_source(path: &Path, document: &Value) -> Result<PathBuf, String> {
     let serialized = serde_yaml::to_string(document).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "config path has no parent directory".to_string())?;
-    let original_permissions = fs::metadata(path)
+    let mut permissions = fs::metadata(path)
         .map_err(|error| error.to_string())?
         .permissions();
-    let stamp = unique_stamp()?;
-    let candidate = parent.join(format!(".mihomo-tui-{}-{stamp}.yaml", std::process::id()));
-    write_new_file(&candidate, serialized.as_bytes(), original_permissions)?;
-    let validation = match crate::runtime::validate_config(&candidate, parent) {
-        Ok(validation) => validation,
-        Err(error) => {
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
-        }
-    };
-    if !validation.status.success() {
-        let _ = fs::remove_file(&candidate);
-        return Err(format!(
-            "Mihomo rejected candidate config: {}",
-            validation_diagnostic(&validation)
-        ));
+    #[cfg(unix)]
+    if document
+        .as_mapping()
+        .and_then(|root| root.get(Value::String("kind".into())))
+        .and_then(Value::as_str)
+        == Some(crate::workspace::WORKSPACE_KIND)
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o600);
     }
+    let stamp = unique_stamp()?;
+    let candidate = parent.join(format!(
+        ".mihomo-tui-source-{}-{stamp}.yaml",
+        std::process::id()
+    ));
+    write_new_file(&candidate, serialized.as_bytes(), permissions)?;
     let backup = parent.join(format!("{}.{stamp}.mihomo-tui.bak", file_name(path)?));
     if let Err(error) = fs::copy(path, &backup) {
         let _ = fs::remove_file(&candidate);
@@ -857,6 +997,65 @@ fn write_validated(path: &Path, document: &Value) -> Result<PathBuf, String> {
         return Err(error);
     }
     if let Err(error) = fs::rename(&candidate, path) {
+        let _ = fs::remove_file(&candidate);
+        let _ = fs::remove_file(&backup);
+        return Err(error.to_string());
+    }
+    sync_directory(parent)?;
+    Ok(backup)
+}
+
+pub fn apply_to_runtime(source: &Path, target: &Path) -> Result<PathBuf, String> {
+    apply_to_runtime_with(source, target, |candidate, data_dir| {
+        let validation = crate::runtime::validate_config(candidate, data_dir)?;
+        if validation.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Mihomo rejected candidate config: {}",
+                validation_diagnostic(&validation)
+            ))
+        }
+    })
+}
+
+fn apply_to_runtime_with<F>(
+    source: &Path,
+    target: &Path,
+    mut validate: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(&Path, &Path) -> Result<(), String>,
+{
+    let profile = crate::workspace::load_profile(source)?;
+    let serialized = serde_yaml::to_string(&profile).map_err(|error| error.to_string())?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "runtime config path has no parent directory".to_string())?;
+    let permissions = fs::metadata(target)
+        .map_err(|error| format!("无法读取运行时配置 {}：{error}", target.display()))?
+        .permissions();
+    let stamp = unique_stamp()?;
+    let candidate = parent.join(format!(
+        ".mihomo-tui-runtime-{}-{stamp}.yaml",
+        std::process::id()
+    ));
+    write_new_file(&candidate, serialized.as_bytes(), permissions)?;
+    if let Err(error) = validate(&candidate, parent) {
+        let _ = fs::remove_file(&candidate);
+        return Err(error);
+    }
+    let backup = parent.join(format!("{}.{stamp}.mihomo-tui.bak", file_name(target)?));
+    if let Err(error) = fs::copy(target, &backup) {
+        let _ = fs::remove_file(&candidate);
+        return Err(error.to_string());
+    }
+    if let Err(error) = restrict_backup_permissions(&backup) {
+        let _ = fs::remove_file(&candidate);
+        let _ = fs::remove_file(&backup);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&candidate, target) {
         let _ = fs::remove_file(&candidate);
         let _ = fs::remove_file(&backup);
         return Err(error.to_string());
@@ -953,7 +1152,7 @@ fn file_name(path: &Path) -> Result<String, String> {
 
 pub fn parse_config(content: &str) -> Result<ConfigSnapshot, String> {
     let document: Value = serde_yaml::from_str(content).map_err(|error| error.to_string())?;
-    let root = document
+    let root = crate::workspace::config_profile(&document)?
         .as_mapping()
         .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
     let rules = field(root, "rules")
