@@ -40,10 +40,168 @@ pub enum ConfigReload {
     LocalSystemd,
 }
 
+#[derive(Default)]
+struct TextInput {
+    value: String,
+    cursor: usize,
+}
+
+impl TextInput {
+    fn with_value(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let cursor = value.len();
+        Self { value, cursor }
+    }
+
+    fn value(&self) -> &str {
+        &self.value
+    }
+
+    fn before_cursor(&self) -> &str {
+        &self.value[..self.cursor]
+    }
+
+    fn insert(&mut self, character: char) {
+        self.value.insert(self.cursor, character);
+        self.cursor += character.len_utf8();
+    }
+
+    fn insert_text(&mut self, text: &str) -> bool {
+        let mut changed = false;
+        for character in text.chars().filter(|character| !character.is_control()) {
+            self.insert(character);
+            changed = true;
+        }
+        changed
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('u') => self.clear(),
+                KeyCode::Char('w') => self.delete_previous_word(),
+                _ => false,
+            };
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return false;
+        }
+        match key.code {
+            KeyCode::Left => {
+                self.move_left();
+                false
+            }
+            KeyCode::Right => {
+                self.move_right();
+                false
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                false
+            }
+            KeyCode::End => {
+                self.cursor = self.value.len();
+                false
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Char(character)
+                if !character.is_control()
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                self.insert(character);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn move_left(&mut self) {
+        if let Some((index, _)) = self.value[..self.cursor].char_indices().next_back() {
+            self.cursor = index;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if let Some(character) = self.value[self.cursor..].chars().next() {
+            self.cursor += character.len_utf8();
+        }
+    }
+
+    fn backspace(&mut self) -> bool {
+        let Some((previous, _)) = self.value[..self.cursor].char_indices().next_back() else {
+            return false;
+        };
+        self.value.drain(previous..self.cursor);
+        self.cursor = previous;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        let Some(character) = self.value[self.cursor..].chars().next() else {
+            return false;
+        };
+        self.value
+            .drain(self.cursor..self.cursor + character.len_utf8());
+        true
+    }
+
+    fn clear(&mut self) -> bool {
+        if self.value.is_empty() {
+            return false;
+        }
+        self.value.clear();
+        self.cursor = 0;
+        true
+    }
+
+    fn delete_previous_word(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let before_cursor = &self.value[..self.cursor];
+        let word_end = before_cursor.trim_end_matches(char::is_whitespace).len();
+        let word_start = before_cursor[..word_end]
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map(|(index, character)| index + character.len_utf8())
+            .unwrap_or(0);
+        self.value.drain(word_start..self.cursor);
+        self.cursor = word_start;
+        true
+    }
+}
+
 struct AddProviderDialog {
-    name: String,
-    url: String,
+    name: TextInput,
+    url: TextInput,
     editing_url: bool,
+    error: Option<String>,
+}
+
+impl AddProviderDialog {
+    fn active_input(&self) -> &TextInput {
+        if self.editing_url {
+            &self.url
+        } else {
+            &self.name
+        }
+    }
+
+    fn active_input_mut(&mut self) -> &mut TextInput {
+        if self.editing_url {
+            &mut self.url
+        } else {
+            &mut self.name
+        }
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        if self.active_input_mut().insert_text(text) {
+            self.error = None;
+        }
+    }
 }
 
 enum WorkerResult {
@@ -136,11 +294,12 @@ impl App {
             self.process_worker_results();
             self.refresh();
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(250))?
-                && let Event::Key(key) = event::read()?
-                && self.handle_key(key)
-            {
-                break;
+            if event::poll(Duration::from_millis(250))? {
+                match event::read()? {
+                    Event::Key(key) if self.handle_key(key) => break,
+                    Event::Paste(text) => self.handle_paste(&text),
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -267,9 +426,10 @@ impl App {
             }
             KeyCode::Char('a') if self.state.page == Page::Config => {
                 self.add_provider = Some(AddProviderDialog {
-                    name: String::new(),
-                    url: String::new(),
+                    name: TextInput::default(),
+                    url: TextInput::default(),
                     editing_url: false,
+                    error: None,
                 });
                 false
             }
@@ -283,9 +443,10 @@ impl App {
                     return false;
                 }
                 self.add_provider = Some(AddProviderDialog {
-                    name: provider.name.clone(),
-                    url: String::new(),
+                    name: TextInput::with_value(provider.name.clone()),
+                    url: TextInput::default(),
                     editing_url: true,
+                    error: None,
                 });
                 false
             }
@@ -413,25 +574,21 @@ impl App {
         match key.code {
             KeyCode::Esc => self.add_provider = None,
             KeyCode::Tab => dialog.editing_url = !dialog.editing_url,
-            KeyCode::Backspace => {
-                if dialog.editing_url {
-                    dialog.url.pop();
-                } else {
-                    dialog.name.pop();
-                }
-            }
-            KeyCode::Char(character) => {
-                if dialog.editing_url {
-                    dialog.url.push(character);
-                } else {
-                    dialog.name.push(character);
-                }
-            }
             KeyCode::Enter if dialog.editing_url => self.commit_add_provider(),
             KeyCode::Enter => dialog.editing_url = true,
-            _ => {}
+            _ => {
+                if dialog.active_input_mut().handle_key(key) {
+                    dialog.error = None;
+                }
+            }
         }
         false
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(dialog) = self.add_provider.as_mut() {
+            dialog.insert_text(text);
+        }
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> bool {
@@ -573,29 +730,41 @@ impl App {
     }
 
     fn commit_add_provider(&mut self) {
-        let Some(dialog) = self.add_provider.take() else {
+        let Some(dialog) = self.add_provider.as_ref() else {
             return;
         };
-        let Some(path) = self.config_path.as_deref() else {
-            self.state.status = "No Mihomo config path discovered".into();
+        let name = dialog.name.value().to_string();
+        let url = dialog.url.value().to_string();
+        let Some(path) = self.config_path.clone() else {
+            self.set_add_provider_error("未发现 Mihomo 配置路径".into());
             return;
         };
         let updating = self
             .config
             .providers
             .iter()
-            .any(|provider| provider.name == dialog.name);
-        match config::add_http_provider(path, &dialog.name, &dialog.url) {
+            .any(|provider| provider.name == name);
+        match config::add_http_provider(&path, &name, &url) {
             Ok(backup) => match self.finalize_config_change(&backup) {
                 Ok(()) => {
                     let action = if updating { "已更新" } else { "已新增" };
-                    self.state.status =
-                        format!("{action} {}；备份 {}", dialog.name, backup.display())
+                    self.add_provider = None;
+                    self.state.status = format!("{action} {name}；备份 {}", backup.display())
                 }
-                Err(error) => self.state.status = format!("订阅未应用：{error}"),
+                Err(error) => self.set_add_provider_error(format!("订阅未应用：{error}")),
             },
-            Err(error) => self.state.status = format!("订阅未保存：{error}"),
+            Err(error) => {
+                let error = provider_form_error(&error);
+                self.set_add_provider_error(format!("订阅未保存：{error}"));
+            }
         }
+    }
+
+    fn set_add_provider_error(&mut self, error: String) {
+        if let Some(dialog) = self.add_provider.as_mut() {
+            dialog.error = Some(error.clone());
+        }
+        self.state.status = error;
     }
 
     fn finalize_config_change(&mut self, backup: &Path) -> Result<(), String> {
@@ -1104,38 +1273,71 @@ impl App {
 
     fn add_provider_dialog(&self, frame: &mut Frame, dialog: &AddProviderDialog) {
         let area = centered_rect(70, 9, frame.area());
-        let name_label = if dialog.editing_url {
-            "名称"
-        } else {
-            "> 名称"
-        };
-        let url_label = if dialog.editing_url { "> URL" } else { "URL" };
         frame.render_widget(Clear, area);
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{name_label}: {}\n{url_label}: {}\n\nTab 切换字段  回车保存  Esc 取消",
-                dialog.name, dialog.url
-            ))
-            .block(Block::bordered().title(" 新增或更新 HTTP 订阅 "))
-            .style(Style::default().fg(Color::White)),
-            area,
-        );
-        let active_line = if dialog.editing_url {
-            format!("> URL: {}", dialog.url)
-        } else {
-            format!("> 名称: {}", dialog.name)
-        };
-        let cursor_offset = u16::try_from(Line::from(active_line).width()).unwrap_or(u16::MAX);
-        let cursor_x = area
+        frame.render_widget(Block::bordered().title(" 新增或更新 HTTP 订阅 "), area);
+        let inner = area.inner(Margin::new(1, 1));
+        let active_label = if dialog.editing_url { "URL" } else { "名称" };
+        let label_width = add_provider_label_width(active_label);
+        let input_width = inner.width.saturating_sub(label_width);
+        let name_row = Rect::new(inner.x, inner.y, inner.width, 1);
+        let url_row = Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1);
+        self.add_provider_field(frame, name_row, "名称", &dialog.name, !dialog.editing_url);
+        self.add_provider_field(frame, url_row, "URL", &dialog.url, dialog.editing_url);
+        if let Some(error) = &dialog.error {
+            frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(Color::Red)),
+                Rect::new(
+                    inner.x,
+                    inner.y.saturating_add(3),
+                    inner.width,
+                    inner.height.saturating_sub(3),
+                ),
+            );
+        }
+        let input = dialog.active_input();
+        let cursor_width = Line::from(input.before_cursor()).width();
+        let scroll = cursor_width.saturating_sub(usize::from(input_width.saturating_sub(1)));
+        let cursor_offset = u16::try_from(cursor_width.saturating_sub(scroll)).unwrap_or(u16::MAX);
+        let cursor_x = inner
             .x
-            .saturating_add(1)
+            .saturating_add(label_width)
             .saturating_add(cursor_offset)
-            .min(area.right().saturating_sub(2));
-        let cursor_y = area
+            .min(inner.right().saturating_sub(1));
+        let cursor_y = inner
             .y
-            .saturating_add(if dialog.editing_url { 2 } else { 1 })
-            .min(area.bottom().saturating_sub(2));
+            .saturating_add(u16::from(dialog.editing_url))
+            .min(inner.bottom().saturating_sub(1));
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
+
+    fn add_provider_field(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        input: &TextInput,
+        active: bool,
+    ) {
+        let label_width = add_provider_label_width(label);
+        let [label_area, input_area] =
+            Layout::horizontal([Constraint::Length(label_width), Constraint::Min(1)]).areas(area);
+        let marker = if active { ">" } else { " " };
+        frame.render_widget(
+            Paragraph::new(format!("{marker} {label}: ")).style(Style::default().fg(if active {
+                Color::Yellow
+            } else {
+                Color::Gray
+            })),
+            label_area,
+        );
+        let cursor_width = Line::from(input.before_cursor()).width();
+        let scroll = cursor_width.saturating_sub(usize::from(input_area.width.saturating_sub(1)));
+        frame.render_widget(
+            Paragraph::new(input.value()).scroll((0, u16::try_from(scroll).unwrap_or(u16::MAX))),
+            input_area,
+        );
     }
 }
 
@@ -1195,6 +1397,22 @@ fn provider_url_label(raw: &str) -> String {
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
     format!("{}://{host}{port}/...", url.scheme())
+}
+
+fn provider_form_error(error: &str) -> String {
+    match error {
+        "Provider name must use letters, digits, - or _, up to 48 characters" => {
+            "名称只能包含字母、数字、- 或 _，最多 48 个字符".into()
+        }
+        "Subscription must be a valid HTTP URL" => {
+            "订阅地址必须是有效的 http:// 或 https:// URL".into()
+        }
+        _ => error.into(),
+    }
+}
+
+fn add_provider_label_width(label: &str) -> u16 {
+    u16::try_from(Line::from(format!("> {label}: ")).width()).unwrap_or(u16::MAX)
 }
 
 fn apply_config(state: &mut AppState, config: &ConfigSnapshot) {
@@ -1476,9 +1694,117 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
 
         let dialog = app.add_provider.as_ref().unwrap();
-        assert_eq!(dialog.name, "airport");
-        assert!(dialog.url.is_empty());
+        assert_eq!(dialog.name.value(), "airport");
+        assert!(dialog.url.value().is_empty());
         assert!(dialog.editing_url);
+    }
+
+    #[test]
+    fn add_provider_input_supports_editing_in_the_middle() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
+        assert_eq!(app.add_provider.as_ref().unwrap().name.value(), "abc");
+    }
+
+    #[test]
+    fn add_provider_paste_inserts_at_the_cursor() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_paste("ac");
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+        app.handle_paste("b");
+
+        assert_eq!(app.add_provider.as_ref().unwrap().name.value(), "abc");
+    }
+
+    #[test]
+    fn add_provider_input_supports_home_end_and_delete() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "abcd".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(app.add_provider.as_ref().unwrap().name.value(), "bc");
+    }
+
+    #[test]
+    fn add_provider_input_supports_clear_and_delete_previous_word() {
+        let mut app = App::new(None, None, None);
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "airport old".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.add_provider.as_ref().unwrap().name.value(), "airport ");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(app.add_provider.as_ref().unwrap().name.value().is_empty());
+    }
+
+    #[test]
+    fn invalid_provider_input_keeps_the_dialog_and_original_values() {
+        let (directory, path) = provider_test_config("provider-invalid");
+        let mut app = App::new(None, None, Some(path));
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "bad name".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for character in "https://subscriptions.example.com/sub".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let dialog = app.add_provider.as_ref().expect("dialog should stay open");
+        assert_eq!(dialog.name.value(), "bad name");
+        assert_eq!(dialog.url.value(), "https://subscriptions.example.com/sub");
+        assert!(
+            dialog
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("名称"))
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn successful_provider_save_closes_the_dialog() {
+        let (directory, path) = provider_test_config("provider-success");
+        let mut app = App::new(None, None, Some(path));
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        for character in "airport".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for character in "https://subscriptions.example.com/sub".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.add_provider.is_none());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1727,5 +2053,34 @@ mod tests {
         app.state.page = Page::Proxies;
         app.proxy_members_focused = true;
         assert!(Line::from(app.shortcut_help()).width() <= 78);
+    }
+
+    fn provider_test_config(label: &str) -> (PathBuf, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+mixed-port: 7890
+mode: rule
+proxy-providers: {}
+proxy-groups:
+  - name: existing
+    type: select
+    proxies: [DIRECT]
+rules:
+  - MATCH,DIRECT
+"#,
+        )
+        .unwrap();
+        (directory, path)
     }
 }
