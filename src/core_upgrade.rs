@@ -127,7 +127,11 @@ pub fn upgrade() -> Result<String, String> {
                 workspace::DEFAULT_SOURCE_PATH
             )
         })?;
-    let previous = prepare_previous_core(&paths, &release, active)?;
+    let Some(previous) = prepare_previous_core(&paths, &release, active)? else {
+        return Ok(format!(
+            "current Mihomo core {candidate_version} already matches the recommended version; no managed activation was needed"
+        ));
+    };
 
     if let Some(candidate) = installed_candidate(&paths, candidate_version)? {
         eprintln!("validating bundled Mihomo {candidate_version}...");
@@ -178,16 +182,26 @@ fn prepare_previous_core(
     paths: &CorePaths,
     release: &CoreRelease,
     active: Option<CoreVersion>,
-) -> Result<CoreVersion, String> {
+) -> Result<Option<CoreVersion>, String> {
     if let Some(version) = active {
-        release.require_supported(version)?;
-        return Ok(version);
+        return rollback_version(release, version);
     }
 
     let (binary, version) = find_system_core()?;
-    release.require_supported(version)?;
+    let rollback = rollback_version(release, version)?;
+    if rollback.is_none() {
+        return Ok(None);
+    }
     install_version(paths, &binary, version)?;
-    Ok(version)
+    Ok(rollback)
+}
+
+fn rollback_version(
+    release: &CoreRelease,
+    version: CoreVersion,
+) -> Result<Option<CoreVersion>, String> {
+    release.require_supported(version)?;
+    Ok((version != release.recommended()).then_some(version))
 }
 
 fn find_system_core() -> Result<(PathBuf, CoreVersion), String> {
@@ -300,6 +314,20 @@ mod tests {
 
     fn version(value: &str) -> CoreVersion {
         CoreVersion::parse(value).unwrap()
+    }
+
+    #[test]
+    fn recommended_core_is_not_used_as_its_own_rollback() {
+        let release = CoreRelease::embedded().unwrap();
+
+        assert_eq!(
+            rollback_version(&release, version("v1.19.28")).unwrap(),
+            Some(version("v1.19.28"))
+        );
+        assert_eq!(
+            rollback_version(&release, release.recommended()).unwrap(),
+            None
+        );
     }
 
     #[cfg(unix)]
