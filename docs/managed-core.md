@@ -42,9 +42,9 @@ managed-core.json       Embedded, reviewable official-core release contract
 src/core.rs             Manifest parsing, validation, version parsing, compatibility policy
 src/system.rs           Trusted root files, sanitized commands, and private temporary paths
 src/core_package.rs     Official package download, integrity checks, metadata, and extraction
-src/core_manager.rs     Versioned layout, immutable installation, active link, and status
+src/core_manager/       Managed-core facade, inventory, immutable storage, and tests
 src/core_upgrade.rs     Candidate validation, activation, API health checks, and rollback
-src/runtime.rs          Privileged installation and systemd lifecycle orchestration
+src/runtime/            Runtime facade, installation, systemd lifecycle, and tests
 src/mihomo.rs           External Controller API boundary
 packaging/debian/       Unit and maintainer-script templates
 scripts/build-deb.sh    Native standalone bundle builder
