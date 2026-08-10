@@ -48,10 +48,10 @@ for directory in "$cores_root" "$version_root"; do
     fi
 done
 if [ -e "$managed_core" ] || [ -L "$managed_core" ]; then
-    trusted_file "$managed_core" && cmp -s "$bundled_core" "$managed_core" || {
+    if ! trusted_file "$managed_core" || ! cmp -s "$bundled_core" "$managed_core"; then
         echo "mihomo-tui: existing managed core differs from bundled $default_core" >&2
         exit 1
-    }
+    fi
 else
     ln "$bundled_core" "$managed_core"
 fi

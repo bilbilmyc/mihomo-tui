@@ -13,8 +13,8 @@ fake_bin="$temp_dir/fake-bin"
 mkdir "$fake_bin"
 {
   echo '#!/usr/bin/env bash'
-  echo 'if [[ ${1:-} == --print-architecture ]]; then'
-  echo '  printf "%s\n" "${MIHOMO_TUI_TEST_ARCH:?}"'
+  echo "if [[ \${1:-} == --print-architecture ]]; then"
+  printf '%s\n' "  printf \"%s\\n\" \"\${MIHOMO_TUI_TEST_ARCH:?}\""
   echo '  exit 0'
   echo 'fi'
   printf 'exec %q "$@"\n' "$real_dpkg"

@@ -153,7 +153,7 @@ install -D -m 755 "$binary" "$shlibs_binary"
   echo
   echo "Package: mihomo-tui"
   echo "Architecture: any"
-  echo 'Depends: ${shlibs:Depends}'
+  echo "Depends: \${shlibs:Depends}"
   echo "Description: temporary metadata for dependency calculation"
 } >"$shlibs_workspace/debian/control"
 shlibs_assignment=$(

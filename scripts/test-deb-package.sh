@@ -44,8 +44,8 @@ bundled_binary="$root/usr/lib/mihomo-tui/bundled/$core_tag/mihomo"
 [[ ! -e $root/usr/lib/mihomo-tui/cores/$core_tag/mihomo ]]
 [[ ! -e $root/usr/lib/mihomo-tui/current && ! -L $root/usr/lib/mihomo-tui/current ]]
 grep -F "default_core='$core_tag'" "$control/postinst" >/dev/null
-grep -F 'bundled_root=$managed_root/bundled' "$control/postinst" >/dev/null
-grep -F 'bundled_core=$bundled_version_root/mihomo' "$control/postinst" >/dev/null
+grep -F "bundled_root=\$managed_root/bundled" "$control/postinst" >/dev/null
+grep -F "bundled_core=\$bundled_version_root/mihomo" "$control/postinst" >/dev/null
 for protected_path in \
   /usr/bin/mihomo \
   /usr/local/bin/mihomo \
