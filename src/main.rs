@@ -1,11 +1,13 @@
 mod app;
 mod config;
 mod core;
+mod core_package;
 mod dialogs;
 mod discovery;
 mod mihomo;
 mod models;
 mod runtime;
+mod system;
 mod workspace;
 
 use app::{App, ConfigReload};

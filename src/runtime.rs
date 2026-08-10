@@ -1,17 +1,18 @@
-use crate::core::{CorePackage, CoreRelease, CoreVersion};
-use sha2::{Digest, Sha256};
+use crate::{
+    core::{CoreRelease, CoreVersion},
+    core_package,
+    system::{checked_output, clean_command, effective_root, run_privileged, trusted_root_file},
+};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output},
-    time::Duration,
+    process::Output,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 const BINARY_PATHS: [&str; 2] = ["/usr/bin/mihomo", "/usr/local/bin/mihomo"];
 const UNIT_PATHS: [&str; 3] = [
     "/etc/systemd/system/mihomo.service",
@@ -434,19 +435,6 @@ fn validate_systemd_unit(expectation: UnitExpectation) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn trusted_root_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
-}
-
-#[cfg(not(unix))]
-fn trusted_root_file(_path: &Path) -> bool {
-    false
-}
-
 fn ensure_systemd() -> Result<(), String> {
     systemctl_path()?;
     if !Path::new("/run/systemd/system").is_dir() {
@@ -455,57 +443,9 @@ fn ensure_systemd() -> Result<(), String> {
     Ok(())
 }
 
-fn clean_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    command
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("LANG", "C");
-    command
-}
-
-fn run_privileged(program: &Path, args: &[&str]) -> Result<Output, String> {
-    if !effective_root() {
-        return Err("该操作需要 root 权限".into());
-    }
-    let mut command = clean_command(program);
-    command
-        .args(args)
-        .output()
-        .map_err(|error| format!("无法执行 {}：{error}", program.display()))
-}
-
-#[cfg(unix)]
-fn effective_root() -> bool {
-    fs::metadata("/proc/self")
-        .map(|metadata| metadata.uid() == 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn effective_root() -> bool {
-    false
-}
-
-fn checked_output(action: &str, output: Output) -> Result<Output, String> {
-    if output.status.success() {
-        return Ok(output);
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = if !stderr.trim().is_empty() {
-        stderr.trim()
-    } else if !stdout.trim().is_empty() {
-        stdout.trim()
-    } else {
-        "无诊断输出"
-    };
-    Err(format!("{action} 失败（{}）：{detail}", output.status))
-}
-
 fn install_for_apply() -> Result<(), String> {
     ensure_systemd()?;
-    ensure_debian_host()?;
+    core_package::ensure_debian_host()?;
     validate_systemd_unit(UnitExpectation::Absent)?;
     let release = CoreRelease::embedded()?;
     let package = release.package_for(std::env::consts::OS, std::env::consts::ARCH)?;
@@ -513,9 +453,9 @@ fn install_for_apply() -> Result<(), String> {
         "未检测到 Mihomo，正在下载官方 {} 安装包...",
         release.recommended()
     );
-    let artifact = download_package(&release, package)?;
+    let artifact = core_package::download_package(&release, package)?;
     eprintln!("安装包校验通过，正在安装 Mihomo 服务...");
-    install_deb(&artifact.path)?;
+    core_package::install_deb(artifact.path())?;
     verify_installed_version()?;
     daemon_reload()?;
     eprintln!(
@@ -523,160 +463,6 @@ fn install_for_apply() -> Result<(), String> {
         release.recommended()
     );
     Ok(())
-}
-
-fn allowed_release_url(url: &reqwest::Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
-    }
-    match url.host_str() {
-        Some("github.com") => url
-            .path()
-            .starts_with("/MetaCubeX/mihomo/releases/download/"),
-        Some(
-            "release-assets.githubusercontent.com"
-            | "objects.githubusercontent.com"
-            | "github-releases.githubusercontent.com",
-        ) => true,
-        _ => false,
-    }
-}
-
-struct TempArtifact {
-    path: PathBuf,
-}
-
-impl TempArtifact {
-    fn create(extension: &str) -> Result<(Self, File), String> {
-        let name = format!("mihomo-tui-{}.{}", random_hex(16)?, extension);
-        let path = secure_temp_dir()?.join(name);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let file = options
-            .open(&path)
-            .map_err(|error| format!("无法创建临时文件 {}：{error}", path.display()))?;
-        Ok((Self { path }, file))
-    }
-}
-
-#[cfg(unix)]
-fn secure_temp_dir() -> Result<&'static Path, String> {
-    let path = Path::new("/tmp");
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("无法检查系统临时目录 /tmp：{error}"))?;
-    let mode = metadata.mode();
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != 0
-        || (mode & 0o022 != 0 && mode & 0o1000 == 0)
-    {
-        return Err("/tmp 的所有者或权限不安全，拒绝创建特权临时文件".into());
-    }
-    Ok(path)
-}
-
-#[cfg(not(unix))]
-fn secure_temp_dir() -> Result<&'static Path, String> {
-    Err("自动安装仅支持 Unix 系统".into())
-}
-
-impl Drop for TempArtifact {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn random_hex(bytes: usize) -> Result<String, String> {
-    let mut random = vec![0_u8; bytes];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut random))
-        .map_err(|error| format!("无法从系统随机源读取数据：{error}"))?;
-    let mut encoded = String::with_capacity(bytes * 2);
-    for byte in random {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").map_err(|error| error.to_string())?;
-    }
-    Ok(encoded)
-}
-
-fn download_package(release: &CoreRelease, package: &CorePackage) -> Result<TempArtifact, String> {
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 5 {
-            attempt.error("Mihomo 安装包重定向次数过多")
-        } else if allowed_release_url(attempt.url()) {
-            attempt.follow()
-        } else {
-            attempt.error("Mihomo 安装包被重定向到非 GitHub 域名")
-        }
-    });
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
-        .redirect(policy)
-        .user_agent(concat!("mihomo-tui/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| format!("无法创建下载客户端：{error}"))?;
-    let mut response = client
-        .get(release.package_url(package))
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| format!("下载 Mihomo 安装包失败：{error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PACKAGE_BYTES)
-    {
-        return Err(format!(
-            "Mihomo 安装包过大（上限 {MAX_PACKAGE_BYTES} 字节）"
-        ));
-    }
-    let (artifact, mut file) = TempArtifact::create("deb")?;
-    copy_verified(&mut response, &mut file, MAX_PACKAGE_BYTES, &package.sha256)?;
-    file.sync_all()
-        .map_err(|error| format!("无法同步临时安装包：{error}"))?;
-    drop(file);
-    validate_deb_file(&artifact.path, package)?;
-    Ok(artifact)
-}
-
-fn validate_deb_file(path: &Path, package: &CorePackage) -> Result<(), String> {
-    let dpkg_deb = Path::new("/usr/bin/dpkg-deb");
-    if !trusted_root_file(dpkg_deb) {
-        return Err("找不到受信任的 /usr/bin/dpkg-deb".into());
-    }
-    let output = clean_command(dpkg_deb)
-        .arg("--field")
-        .arg(path)
-        .args(["Package", "Version", "Architecture"])
-        .output()
-        .map_err(|error| format!("无法检查 Mihomo deb 元数据：{error}"))?;
-    let output = checked_output("dpkg-deb --field", output)?;
-    let metadata =
-        String::from_utf8(output.stdout).map_err(|_| "Mihomo deb 元数据不是 UTF-8".to_string())?;
-    validate_deb_metadata(&metadata, package)
-}
-
-fn ensure_debian_host() -> Result<(), String> {
-    if !Path::new("/etc/debian_version").is_file() {
-        return Err("自动安装目前仅支持 Debian/Ubuntu；请使用 --controller 连接外部 Mihomo".into());
-    }
-    for tool in ["/usr/bin/dpkg", "/usr/bin/dpkg-deb", "/usr/bin/install"] {
-        if !trusted_root_file(Path::new(tool)) {
-            return Err(format!("找不到受信任的系统工具 {tool}"));
-        }
-    }
-    Ok(())
-}
-
-fn install_deb(path: &Path) -> Result<(), String> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| "临时安装包路径不是 UTF-8".to_string())?;
-    let output = run_privileged(
-        Path::new("/usr/bin/dpkg"),
-        &["--force-confold", "--install", path],
-    )?;
-    checked_output("dpkg 安装 Mihomo", output).map(|_| ())
 }
 
 fn verify_installed_version() -> Result<(), String> {
@@ -691,66 +477,6 @@ fn daemon_reload() -> Result<(), String> {
     let systemctl = systemctl_path()?;
     let output = run_privileged(&systemctl, &["daemon-reload"])?;
     checked_output("systemctl daemon-reload", output).map(|_| ())
-}
-
-fn validate_deb_metadata(metadata: &str, package: &CorePackage) -> Result<(), String> {
-    let field = |name: &str| {
-        metadata.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            (key.trim() == name).then(|| value.trim())
-        })
-    };
-    let expected = [
-        ("Package", "mihomo"),
-        ("Version", package.deb_version.as_str()),
-        ("Architecture", package.deb_arch.as_str()),
-    ];
-    for (name, expected_value) in expected {
-        let actual = field(name).ok_or_else(|| format!("安装包缺少 {name} 元数据"))?;
-        if actual != expected_value {
-            return Err(format!(
-                "安装包 {name} 不匹配：期望 {expected_value}，实际 {actual}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn copy_verified(
-    mut reader: impl Read,
-    mut writer: impl Write,
-    max_bytes: u64,
-    expected_sha256: &str,
-) -> Result<u64, String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .ok_or_else(|| "Mihomo 安装包大小溢出".to_string())?;
-        if total > max_bytes {
-            return Err(format!("Mihomo 安装包过大（上限 {max_bytes} 字节）"));
-        }
-        hasher.update(&buffer[..read]);
-        writer
-            .write_all(&buffer[..read])
-            .map_err(|error| error.to_string())?;
-    }
-    writer.flush().map_err(|error| error.to_string())?;
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != expected_sha256 {
-        return Err(format!(
-            "Mihomo 安装包 SHA-256 校验失败：期望 {expected_sha256}，实际 {actual}"
-        ));
-    }
-    Ok(total)
 }
 
 #[cfg(test)]
@@ -858,124 +584,6 @@ mod tests {
                 Action::RejectPartialInstall
             );
         }
-    }
-
-    #[test]
-    fn supported_debian_architectures_use_pinned_packages() {
-        let release = CoreRelease::embedded().unwrap();
-        let amd64 = release.package_for("linux", "x86_64").unwrap();
-        assert_eq!(amd64.asset, "mihomo-linux-amd64-v1-v1.19.29.deb");
-        assert_eq!(
-            amd64.sha256,
-            "6919c50b403a60c3956d07e776c06e1b11bd466e6b05341c1605ce450f79a591"
-        );
-
-        let arm64 = release.package_for("linux", "aarch64").unwrap();
-        assert_eq!(arm64.asset, "mihomo-linux-arm64-v1.19.29.deb");
-        assert_eq!(
-            arm64.sha256,
-            "a14e694a2bac6ca3848e05f4ef27596c5982dab812c23743823e7e5c35f7cfc9"
-        );
-        assert!(release.package_for("linux", "mips").is_err());
-        assert!(release.package_for("macos", "x86_64").is_err());
-    }
-
-    #[test]
-    fn package_bytes_are_limited_and_sha256_verified() {
-        let mut output = Vec::new();
-        copy_verified(
-            std::io::Cursor::new(b"abc"),
-            &mut output,
-            3,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        )
-        .unwrap();
-        assert_eq!(output, b"abc");
-
-        let too_large = copy_verified(
-            std::io::Cursor::new(b"abcd"),
-            Vec::new(),
-            3,
-            "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589",
-        )
-        .unwrap_err();
-        assert!(too_large.contains("过大"));
-
-        let mismatch = copy_verified(
-            std::io::Cursor::new(b"abc"),
-            Vec::new(),
-            3,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        )
-        .unwrap_err();
-        assert!(mismatch.contains("SHA-256"));
-    }
-
-    #[test]
-    fn deb_metadata_must_match_the_pinned_package() {
-        let release = CoreRelease::embedded().unwrap();
-        let package = release.package_for("linux", "x86_64").unwrap();
-        validate_deb_metadata(
-            "Package: mihomo\nVersion: 1.19.29\nArchitecture: amd64\n",
-            package,
-        )
-        .unwrap();
-
-        assert!(
-            validate_deb_metadata(
-                "Package: other\nVersion: 1.19.29\nArchitecture: amd64\n",
-                package,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_deb_metadata(
-                "Package: mihomo\nVersion: 1.19.29\nArchitecture: arm64\n",
-                package,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn download_url_and_redirects_are_restricted_to_github_release_hosts() {
-        let release = CoreRelease::embedded().unwrap();
-        let package = release.package_for("linux", "x86_64").unwrap();
-        assert_eq!(
-            release.package_url(package),
-            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.29/mihomo-linux-amd64-v1-v1.19.29.deb"
-        );
-
-        assert!(allowed_release_url(
-            &reqwest::Url::parse("https://github.com/MetaCubeX/mihomo/releases/download/v/file")
-                .unwrap()
-        ));
-        assert!(allowed_release_url(
-            &reqwest::Url::parse("https://release-assets.githubusercontent.com/file").unwrap()
-        ));
-        assert!(!allowed_release_url(
-            &reqwest::Url::parse("http://github.com/file").unwrap()
-        ));
-        assert!(!allowed_release_url(
-            &reqwest::Url::parse("https://example.com/file").unwrap()
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn world_writable_runtime_files_are_not_trusted() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = Path::new("/tmp").join(format!(
-            "mihomo-tui-untrusted-{}-{}",
-            std::process::id(),
-            random_hex(8).unwrap()
-        ));
-        fs::write(&path, b"not executable").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-
-        assert!(!trusted_root_file(&path));
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
