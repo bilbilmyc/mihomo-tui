@@ -218,6 +218,7 @@ install -m 644 "$package_root/usr/share/doc/mihomo-tui/Mihomo-NOTICE" "$package_
 
 sed "s|@CORE_TAG@|$core_tag|g" "$repo_root/packaging/debian/postinst" >"$package_root/DEBIAN/postinst"
 chmod 755 "$package_root/DEBIAN/postinst"
+install -m 755 "$repo_root/packaging/debian/preinst" "$package_root/DEBIAN/preinst"
 install -m 755 "$repo_root/packaging/debian/prerm" "$package_root/DEBIAN/prerm"
 install -m 755 "$repo_root/packaging/debian/postrm" "$package_root/DEBIAN/postrm"
 installed_size=$(du -sk "$package_root/usr" "$package_root/etc" | awk '{ total += $1 } END { print total }')

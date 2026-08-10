@@ -46,6 +46,21 @@ bundled_binary="$root/usr/lib/mihomo-tui/bundled/$core_tag/mihomo"
 grep -F "default_core='$core_tag'" "$control/postinst" >/dev/null
 grep -F 'bundled_root=$managed_root/bundled' "$control/postinst" >/dev/null
 grep -F 'bundled_core=$bundled_version_root/mihomo' "$control/postinst" >/dev/null
+for protected_path in \
+  /usr/bin/mihomo \
+  /usr/local/bin/mihomo \
+  /usr/bin/mihomo-tui \
+  /usr/local/bin/mihomo-tui \
+  /usr/lib/mihomo-tui \
+  /etc/systemd/system/mihomo.service \
+  /etc/systemd/system/mihomo.service.d \
+  /etc/systemd/system/multi-user.target.wants/mihomo.service \
+  /run/systemd/system/mihomo.service \
+  /run/systemd/system/mihomo.service.d \
+  /usr/lib/systemd/system/mihomo.service \
+  /lib/systemd/system/mihomo.service; do
+  grep -F "$protected_path" "$control/preinst" >/dev/null
+done
 grep -F "ExecStart=/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui" "$root/usr/lib/systemd/system/mihomo.service" >/dev/null
 grep -F "Source: https://github.com/MetaCubeX/mihomo/tree/$core_tag" "$root/usr/share/doc/mihomo-tui/Mihomo-NOTICE" >/dev/null
 actual_license_sha256=$(sha256sum "$root/usr/share/doc/mihomo-tui/Mihomo-LICENSE")
@@ -55,7 +70,7 @@ for document in Mihomo-LICENSE Mihomo-NOTICE copyright; do
   [[ $(stat -c '%a' "$root/usr/share/doc/mihomo-tui/$document") == 644 ]]
 done
 
-for script in postinst prerm postrm; do
+for script in preinst postinst prerm postrm; do
   sh -n "$control/$script"
 done
 verification_unit="$temp_dir/mihomo-verify.service"

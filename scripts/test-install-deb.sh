@@ -35,6 +35,7 @@ fi
 for path in \
   /etc/mihomo-tui \
   /usr/bin/mihomo \
+  /usr/local/bin/mihomo \
   /usr/bin/mihomo-tui \
   /usr/lib/mihomo-tui \
   /usr/lib/systemd/system/mihomo.service; do
@@ -47,8 +48,10 @@ done
 core_tag=$(jq -er '.recommended' "$manifest")
 architecture=$(dpkg-deb --field "$package" Architecture)
 [[ $architecture == "$(dpkg --print-architecture)" ]]
+conflicting_core=/usr/local/bin/mihomo
 
 cleanup() {
+  rm -f "$conflicting_core"
   dpkg --purge mihomo-tui >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -98,7 +101,6 @@ dpkg --install "$package"
 ln -sfn "cores/$core_tag" /usr/lib/mihomo-tui/current
 
 dpkg --purge mihomo-tui
-trap - EXIT
 for path in \
   /etc/mihomo-tui \
   /usr/bin/mihomo-tui \
@@ -110,4 +112,15 @@ for path in \
   }
 done
 
+install -m 755 /bin/true "$conflicting_core"
+if install_output=$(dpkg --install "$package" 2>&1); then
+  echo "package installation accepted an unmanaged core path" >&2
+  exit 1
+fi
+grep -F "refusing to replace unmanaged host path: $conflicting_core" <<<"$install_output" >/dev/null
+[[ -x $conflicting_core ]]
+[[ ! -e /usr/bin/mihomo-tui && ! -L /usr/bin/mihomo-tui ]]
+
+cleanup
+trap - EXIT
 echo "Disposable-host Debian install verification passed: $package"
