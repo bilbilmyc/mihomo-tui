@@ -57,6 +57,11 @@ registered under `/usr/lib/mihomo-tui/cores/<version>` and selected by `current`
 creates or imports `/etc/mihomo-tui/config.yaml`; pressing `p` explicitly validates the config and
 starts or reloads the managed service.
 
+A fresh package install stops before unpacking if it finds existing Mihomo or mihomo-tui binaries,
+a managed-core root, or a Mihomo systemd unit/drop-in in the paths owned by the bundle. Remove the
+conflicting local installation first, or keep it and run the standalone TUI in external-controller
+mode. Package upgrades skip this fresh-install guard and preserve the selected managed core.
+
 For a paired package/core update, install the reviewed new Deb first, inspect both versions, then
 activate explicitly:
 

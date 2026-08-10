@@ -72,6 +72,11 @@ or start `mihomo.service`. On a clean host, `postinst` selects the bundled versi
 `current` link exists. Running the TUI initializes `/etc/mihomo-tui/config.yaml`; pressing `p` is the
 explicit action that validates the config and starts or reloads the service.
 
+Before unpacking a fresh install, `preinst` rejects existing Mihomo or mihomo-tui binaries, the
+managed-core root, and common Mihomo unit, drop-in, or enable-symlink paths under `/etc`, `/run`,
+`/usr/lib`, and `/lib`. This prevents the bundle from taking ownership of an unmanaged installation.
+The guard does not run for package upgrades, where those paths already belong to this package.
+
 ## Package And Core Upgrade
 
 Installing a reviewed newer bundle is preparation, not activation:
