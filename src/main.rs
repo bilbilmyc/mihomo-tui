@@ -222,4 +222,24 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn github_workflows_are_valid_yaml_with_explicit_jobs() {
+        for (name, workflow) in [
+            ("ci", include_str!("../.github/workflows/ci.yml")),
+            (
+                "managed-core-sync",
+                include_str!("../.github/workflows/managed-core-sync.yml"),
+            ),
+        ] {
+            let document: serde_yaml::Value = serde_yaml::from_str(workflow).unwrap();
+
+            assert!(document.get("on").is_some(), "{name} has no trigger");
+            assert!(document.get("jobs").is_some(), "{name} has no jobs");
+            assert!(
+                document.get("permissions").is_some(),
+                "{name} has no explicit permissions"
+            );
+        }
+    }
 }

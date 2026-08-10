@@ -1,0 +1,106 @@
+name: Propose managed Mihomo core update
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
+      branch: ${{ steps.proposal.outputs.branch }}
+      version: ${{ steps.proposal.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Sync latest reviewed-compatible release
+        run: ./scripts/sync-managed-core.sh
+      - name: Detect manifest changes
+        id: changes
+        run: |
+          if git diff --quiet -- managed-core.json; then
+            echo "changed=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Push proposal branch
+        id: proposal
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          version=$(jq -er '.recommended' managed-core.json)
+          branch="automation/mihomo-${version}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add managed-core.json
+          git commit -m "chore: propose Mihomo ${version}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          fi
+          git push --force-with-lease="$branch" origin "$branch"
+          echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+  verify:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            architecture: aarch64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.branch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify native architecture
+        run: 'rustc -vV | grep "host: ${{ matrix.architecture }}-unknown-linux-gnu"'
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Test
+        run: cargo test --all-targets
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build release binary
+        run: cargo build --release --locked
+
+  open-pr:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Open pull request after verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --base master --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [[ -z $existing ]]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base master \
+              --head "$BRANCH" \
+              --title "chore: propose Mihomo ${VERSION}" \
+              --body "Updates the pinned official Mihomo packages and hashes inside the existing reviewed compatibility range. Both native architectures passed tests, Clippy, and release builds. A human must approve before merge or release."
+          fi
