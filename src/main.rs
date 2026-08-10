@@ -29,10 +29,13 @@ struct Args {
     /// Mihomo API secret. Prefer MIHOMO_SECRET in shell environments.
     #[arg(long, env = "MIHOMO_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// Mihomo config file used to auto-discover the controller and secret.
+    /// Mihomo runtime config imported on first use and written by explicit apply.
     #[arg(long, env = "MIHOMO_CONFIG")]
     config: Option<PathBuf>,
-    /// Do not download Mihomo when no local installation exists.
+    /// Independent mihomo-tui configuration source.
+    #[arg(long, env = "MIHOMO_TUI_CONFIG")]
+    workspace: Option<PathBuf>,
+    /// Do not download Mihomo during explicit apply.
     #[arg(long)]
     no_auto_install: bool,
 }
@@ -51,56 +54,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let controller_was_explicit = args.controller.is_some();
     let config_was_explicit = args.config.is_some();
-    let mut discovered = should_discover_config(controller_was_explicit, config_was_explicit)
-        .then(|| discovery::discover(args.config.as_deref()))
-        .flatten();
-    if config_was_explicit && discovered.is_none() {
-        let path = args
-            .config
-            .as_deref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<unknown>".into());
+    let source_path = args
+        .workspace
+        .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_SOURCE_PATH));
+    let runtime_path = args
+        .config
+        .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_RUNTIME_PATH));
+    if config_was_explicit && std::fs::symlink_metadata(&runtime_path).is_err() {
         return Err(std::io::Error::other(format!(
-            "无法从显式 Mihomo 配置 {path} 读取 external-controller"
+            "显式 Mihomo 运行配置不存在：{}",
+            runtime_path.display()
         ))
         .into());
     }
-    let mode = runtime_mode(
-        controller_was_explicit,
-        config_was_explicit,
-        discovered.as_ref().map(|info| info.origin),
-        discovery::user_config_exists(),
-    );
-    runtime::ensure(mode, !args.no_auto_install).map_err(std::io::Error::other)?;
-    if mode == runtime::RuntimeMode::ManagedLocal {
-        discovered = discovery::discover(args.config.as_deref());
-    }
-    if mode == runtime::RuntimeMode::ManagedLocal && discovered.is_none() && !args.no_auto_install {
-        return Err(std::io::Error::other(
-            "系统 Mihomo 配置没有可读取的 external-controller；请修复 /etc/mihomo/config.yaml 或使用 --controller",
-        )
-        .into());
-    }
+    workspace::initialize(&source_path, Some(&runtime_path)).map_err(std::io::Error::other)?;
+    let discovered = discovery::discover(Some(&source_path));
     let controller = args
         .controller
         .or_else(|| discovered.as_ref().map(|info| info.controller.clone()));
-    let secret = args
-        .secret
-        .or_else(|| discovered.as_ref().and_then(|info| info.secret.clone()));
-    let config_path = args
-        .config
-        .or_else(|| discovered.as_ref().map(|info| info.config_path.clone()));
+    let secret = args.secret.or_else(|| {
+        (!controller_was_explicit)
+            .then(|| discovered.as_ref().and_then(|info| info.secret.clone()))
+            .flatten()
+    });
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
-    let config_reload = match mode {
-        runtime::RuntimeMode::External => ConfigReload::None,
-        runtime::RuntimeMode::ManagedLocal => ConfigReload::LocalSystemd,
-    };
-    let result =
-        App::with_config_reload(controller, secret, config_path, config_reload).run(&mut terminal);
+    let config_reload = apply_policy(controller_was_explicit, config_was_explicit);
+    let result = App::with_workspace(
+        controller,
+        secret,
+        Some(source_path),
+        Some(runtime_path),
+        config_reload,
+        !args.no_auto_install,
+    )
+    .run(&mut terminal);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -111,26 +102,11 @@ fn render_fatal_error(error: impl Display) -> String {
     format!("mihomo-tui: {error}")
 }
 
-fn should_discover_config(controller_was_explicit: bool, config_was_explicit: bool) -> bool {
-    !controller_was_explicit || config_was_explicit
-}
-
-fn runtime_mode(
-    controller_was_explicit: bool,
-    config_was_explicit: bool,
-    origin: Option<discovery::ConfigOrigin>,
-    user_config_exists: bool,
-) -> runtime::RuntimeMode {
-    if controller_was_explicit || config_was_explicit {
-        return runtime::RuntimeMode::External;
-    }
-    match origin {
-        Some(discovery::ConfigOrigin::System) => runtime::RuntimeMode::ManagedLocal,
-        Some(discovery::ConfigOrigin::Explicit | discovery::ConfigOrigin::User) => {
-            runtime::RuntimeMode::External
-        }
-        None if user_config_exists => runtime::RuntimeMode::External,
-        None => runtime::RuntimeMode::ManagedLocal,
+fn apply_policy(controller_was_explicit: bool, config_was_explicit: bool) -> ConfigReload {
+    if controller_was_explicit && !config_was_explicit {
+        ConfigReload::None
+    } else {
+        ConfigReload::LocalSystemd
     }
 }
 
@@ -139,42 +115,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_and_user_connections_never_manage_the_local_service() {
-        assert_eq!(
-            runtime_mode(true, false, None, false),
-            runtime::RuntimeMode::External
-        );
-        assert_eq!(
-            runtime_mode(false, true, None, false),
-            runtime::RuntimeMode::External
-        );
-        assert_eq!(
-            runtime_mode(false, false, Some(discovery::ConfigOrigin::User), true),
-            runtime::RuntimeMode::External
-        );
-        assert_eq!(
-            runtime_mode(false, false, None, true),
-            runtime::RuntimeMode::External
-        );
+    fn explicit_remote_controller_disables_local_apply_without_a_target() {
+        assert_eq!(apply_policy(true, false), ConfigReload::None);
     }
 
     #[test]
-    fn explicit_remote_controller_does_not_discover_local_credentials() {
-        assert!(!should_discover_config(true, false));
-        assert!(should_discover_config(true, true));
-        assert!(should_discover_config(false, false));
-    }
-
-    #[test]
-    fn system_or_clean_local_state_is_managed() {
-        assert_eq!(
-            runtime_mode(false, false, Some(discovery::ConfigOrigin::System), false),
-            runtime::RuntimeMode::ManagedLocal
-        );
-        assert_eq!(
-            runtime_mode(false, false, None, false),
-            runtime::RuntimeMode::ManagedLocal
-        );
+    fn default_or_explicit_runtime_target_enables_local_apply() {
+        assert_eq!(apply_policy(false, false), ConfigReload::LocalSystemd);
+        assert_eq!(apply_policy(false, true), ConfigReload::LocalSystemd);
+        assert_eq!(apply_policy(true, true), ConfigReload::LocalSystemd);
     }
 
     #[test]

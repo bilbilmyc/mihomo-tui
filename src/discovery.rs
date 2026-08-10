@@ -8,15 +8,6 @@ use std::{
 pub struct ConnectionInfo {
     pub controller: String,
     pub secret: Option<String>,
-    pub config_path: PathBuf,
-    pub origin: ConfigOrigin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigOrigin {
-    Explicit,
-    System,
-    User,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,48 +19,30 @@ struct MihomoConfig {
 
 pub fn discover(explicit_path: Option<&Path>) -> Option<ConnectionInfo> {
     if let Some(path) = explicit_path {
-        return read_config(path, ConfigOrigin::Explicit);
+        return read_config(path);
     }
     let mut candidates = Vec::new();
     candidates.extend([
-        (
-            PathBuf::from("/etc/mihomo/config.yaml"),
-            ConfigOrigin::System,
-        ),
-        (
-            PathBuf::from("/etc/mihomo/config.yml"),
-            ConfigOrigin::System,
-        ),
+        PathBuf::from("/etc/mihomo/config.yaml"),
+        PathBuf::from("/etc/mihomo/config.yml"),
     ]);
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home).join(".config/mihomo");
-        candidates.push((home.join("config.yaml"), ConfigOrigin::User));
-        candidates.push((home.join("config.yml"), ConfigOrigin::User));
+        candidates.push(home.join("config.yaml"));
+        candidates.push(home.join("config.yml"));
     }
-    candidates
-        .into_iter()
-        .find_map(|(path, origin)| read_config(&path, origin))
+    candidates.into_iter().find_map(|path| read_config(&path))
 }
 
-pub fn user_config_exists() -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let home = PathBuf::from(home).join(".config/mihomo");
-    [home.join("config.yaml"), home.join("config.yml")]
-        .into_iter()
-        .any(|path| fs::symlink_metadata(path).is_ok())
-}
-
-fn read_config(path: &Path, origin: ConfigOrigin) -> Option<ConnectionInfo> {
+fn read_config(path: &Path) -> Option<ConnectionInfo> {
     let content = fs::read_to_string(path).ok()?;
-    let config: MihomoConfig = serde_yaml::from_str(&content).ok()?;
+    let document: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let profile = crate::workspace::config_profile(&document).ok()?;
+    let config: MihomoConfig = serde_yaml::from_value(profile.clone()).ok()?;
     let controller = normalize_controller(&config.external_controller?);
     Some(ConnectionInfo {
         controller,
         secret: config.secret.filter(|value| !value.is_empty()),
-        config_path: path.to_path_buf(),
-        origin,
     })
 }
 
@@ -103,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_config_keeps_its_trust_origin() {
+    fn reads_an_explicit_config() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -118,9 +91,9 @@ mod tests {
         )
         .unwrap();
 
-        let info = read_config(&path, ConfigOrigin::Explicit).unwrap();
+        let info = read_config(&path).unwrap();
 
-        assert_eq!(info.origin, ConfigOrigin::Explicit);
+        assert_eq!(info.controller, "http://127.0.0.1:9090");
         fs::remove_file(path).unwrap();
     }
 
@@ -136,5 +109,28 @@ mod tests {
         ));
 
         assert!(discover(Some(&missing)).is_none());
+    }
+
+    #[test]
+    fn discovers_controller_credentials_from_a_workspace_profile() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomo-tui-workspace-discovery-{}-{unique}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  external-controller: 0.0.0.0:19093\n  secret: workspace-secret\n",
+        )
+        .unwrap();
+
+        let info = read_config(&path).unwrap();
+
+        assert_eq!(info.controller, "http://127.0.0.1:19093");
+        assert_eq!(info.secret.as_deref(), Some("workspace-secret"));
+        fs::remove_file(path).unwrap();
     }
 }

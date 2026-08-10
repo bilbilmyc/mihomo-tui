@@ -341,7 +341,10 @@ rules:
 
         let backup = super::write_source(&path, &invalid).unwrap();
 
-        assert_eq!(fs::read_to_string(&path).unwrap(), "rules:\n- MATCH\n- DIRECT\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "rules:\n- MATCH\n- DIRECT\n"
+        );
         fs::remove_file(backup).unwrap();
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
@@ -412,10 +415,9 @@ profile:
         .unwrap();
         fs::write(&target, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
 
-        let error = super::apply_to_runtime_with(&source, &target, |_, _| {
-            Err("candidate rejected".into())
-        })
-        .unwrap_err();
+        let error =
+            super::apply_to_runtime_with(&source, &target, |_, _| Err("candidate rejected".into()))
+                .unwrap_err();
 
         assert_eq!(
             fs::read_to_string(&target).unwrap(),

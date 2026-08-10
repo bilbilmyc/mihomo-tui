@@ -35,8 +35,8 @@ pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization
         None => (default_profile()?, Initialization::Created),
     };
     let document = wrap_profile(profile);
-    let content = serde_yaml::to_string(&document)
-        .map_err(|error| format!("无法序列化独立配置：{error}"))?;
+    let content =
+        serde_yaml::to_string(&document).map_err(|error| format!("无法序列化独立配置：{error}"))?;
     create_source(source, content.as_bytes())?;
     Ok(result)
 }
@@ -98,10 +98,7 @@ fn read_raw_profile(path: &Path) -> Result<Value, String> {
     let profile: Value = serde_yaml::from_str(&content)
         .map_err(|error| format!("待导入配置 {} 不是有效 YAML：{error}", path.display()))?;
     if profile.as_mapping().is_none() {
-        return Err(format!(
-            "待导入配置 {} 的根节点必须是映射",
-            path.display()
-        ));
+        return Err(format!("待导入配置 {} 的根节点必须是映射", path.display()));
     }
     Ok(profile)
 }
@@ -178,9 +175,8 @@ fn create_source(path: &Path, content: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("无法创建独立配置目录 {}：{error}", parent.display()))?;
     #[cfg(unix)]
     if !parent_existed {
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            format!("无法设置独立配置目录权限 {}：{error}", parent.display())
-        })?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("无法设置独立配置目录权限 {}：{error}", parent.display()))?;
     }
 
     let mut options = OpenOptions::new();
@@ -266,8 +262,7 @@ rules: [MATCH,DIRECT]
 
         assert_eq!(result, Initialization::Imported(legacy.clone()));
         assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_content);
-        let document: Value =
-            serde_yaml::from_str(&fs::read_to_string(&source).unwrap()).unwrap();
+        let document: Value = serde_yaml::from_str(&fs::read_to_string(&source).unwrap()).unwrap();
         assert_eq!(document["kind"], WORKSPACE_KIND);
         assert_eq!(document["backend"], WORKSPACE_BACKEND);
         assert_eq!(document["profile"]["secret"], "private");
