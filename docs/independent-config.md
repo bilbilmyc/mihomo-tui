@@ -67,7 +67,7 @@ Applying is a separate user command. For the managed local backend it performs:
 1. Read and validate the source wrapper.
 2. Serialize only `profile` as a candidate runtime config.
 3. Ensure the managed Mihomo runtime is available when automatic installation is
-   enabled.
+   enabled, without starting an existing stopped service on the old config.
 4. Validate the candidate with the trusted Mihomo executable.
 5. Atomically replace the runtime target while retaining a mode-`0600` backup.
 6. Reload or restart `mihomo.service`.
@@ -78,14 +78,14 @@ reload fails, the target is rolled back and the restored version is reloaded.
 Source edits are never rolled back by an apply failure.
 
 External controller mode does not manage a local service. Its source remains
-editable, but local apply is unavailable unless a managed runtime target was
-explicitly configured.
+editable, but local apply is unavailable.
 
 ## Command-Line Contract
 
 - `--workspace` / `MIHOMO_TUI_CONFIG` selects the independent source.
 - `--config` / `MIHOMO_CONFIG` selects a legacy/runtime config to import on first
-  use and the runtime target for explicit apply.
+  use and compare with the source. Explicit configs are treated as external and
+  never cause local systemd management.
 - `--controller` / `MIHOMO_CONTROLLER` and `--secret` / `MIHOMO_SECRET` override
   controller discovery without changing either file.
 - `--no-auto-install` prevents installation during apply. It does not affect
