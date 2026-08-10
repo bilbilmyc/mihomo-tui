@@ -407,7 +407,7 @@ profile:
     }
 
     #[test]
-    fn failed_runtime_validation_leaves_the_target_unchanged() {
+    fn failed_runtime_validation_leaves_the_single_config_unchanged() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -418,30 +418,21 @@ profile:
         ));
         fs::create_dir(&directory).unwrap();
         let source = directory.join("source.yaml");
-        let target = directory.join("target.yaml");
-        fs::write(
-            &source,
-            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: global\n  rules: [MATCH,DIRECT]\n",
-        )
-        .unwrap();
-        fs::write(&target, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
+        fs::write(&source, "mode: global\nrules: ['MATCH,DIRECT']\n").unwrap();
+        let before = fs::read_to_string(&source).unwrap();
 
         let error =
-            super::apply_to_runtime_with(&source, &target, |_, _| Err("candidate rejected".into()))
+            super::validate_for_runtime_with(&source, |_, _| Err("candidate rejected".into()))
                 .unwrap_err();
 
-        assert_eq!(
-            fs::read_to_string(&target).unwrap(),
-            "mode: rule\nrules: [MATCH,DIRECT]\n"
-        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), before);
         assert_eq!(error, "candidate rejected");
         fs::remove_file(source).unwrap();
-        fs::remove_file(target).unwrap();
         fs::remove_dir(directory).unwrap();
     }
 
     #[test]
-    fn runtime_apply_writes_only_the_profile_and_keeps_a_backup() {
+    fn runtime_validation_uses_native_mihomo_yaml_without_creating_a_target() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -452,31 +443,23 @@ profile:
         ));
         fs::create_dir(&directory).unwrap();
         let source = directory.join("source.yaml");
-        let target = directory.join("target.yaml");
         fs::write(
             &source,
-            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: global\n  rules: [MATCH,DIRECT]\n",
+            "mode: global\ncustom:\n  keep: true\nrules: ['MATCH,DIRECT']\n",
         )
         .unwrap();
-        fs::write(&target, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
 
-        let backup = super::apply_to_runtime_with(&source, &target, |candidate, _| {
+        super::validate_for_runtime_with(&source, |candidate, data_dir| {
             let content = fs::read_to_string(candidate).unwrap();
             assert!(!content.contains("mihomo-tui/v1"));
+            assert!(content.contains("keep: true"));
+            assert_eq!(data_dir, directory.as_path());
             Ok(())
         })
         .unwrap();
 
-        let applied: Value = serde_yaml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
-        assert_eq!(applied["mode"], "global");
-        assert!(applied.get("kind").is_none());
-        assert_eq!(
-            fs::read_to_string(&backup).unwrap(),
-            "mode: rule\nrules: [MATCH,DIRECT]\n"
-        );
-        fs::remove_file(backup).unwrap();
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::remove_file(source).unwrap();
-        fs::remove_file(target).unwrap();
         fs::remove_dir(directory).unwrap();
     }
 
@@ -1018,8 +1001,8 @@ fn write_source(path: &Path, document: &Value) -> Result<PathBuf, String> {
     Ok(backup)
 }
 
-pub fn apply_to_runtime(source: &Path, target: &Path) -> Result<PathBuf, String> {
-    apply_to_runtime_with(source, target, |candidate, data_dir| {
+pub fn validate_for_runtime(source: &Path) -> Result<(), String> {
+    validate_for_runtime_with(source, |candidate, data_dir| {
         let validation = crate::runtime::validate_config(candidate, data_dir)?;
         if validation.status.success() {
             Ok(())
@@ -1032,49 +1015,28 @@ pub fn apply_to_runtime(source: &Path, target: &Path) -> Result<PathBuf, String>
     })
 }
 
-fn apply_to_runtime_with<F>(
-    source: &Path,
-    target: &Path,
-    mut validate: F,
-) -> Result<PathBuf, String>
+fn validate_for_runtime_with<F>(source: &Path, mut validate: F) -> Result<(), String>
 where
     F: FnMut(&Path, &Path) -> Result<(), String>,
 {
     let profile = crate::workspace::load_profile(source)?;
     let serialized = serde_yaml::to_string(&profile).map_err(|error| error.to_string())?;
-    let parent = target
+    let parent = source
         .parent()
-        .ok_or_else(|| "runtime config path has no parent directory".to_string())?;
-    let permissions = fs::metadata(target)
-        .map_err(|error| format!("无法读取运行时配置 {}：{error}", target.display()))?
+        .ok_or_else(|| "config path has no parent directory".to_string())?;
+    let permissions = fs::metadata(source)
+        .map_err(|error| format!("无法读取配置 {}：{error}", source.display()))?
         .permissions();
     let stamp = unique_stamp()?;
     let candidate = parent.join(format!(
-        ".mihomo-tui-runtime-{}-{stamp}.yaml",
+        ".mihomo-tui-validate-{}-{stamp}.yaml",
         std::process::id()
     ));
     write_new_file(&candidate, serialized.as_bytes(), permissions)?;
-    if let Err(error) = validate(&candidate, parent) {
-        let _ = fs::remove_file(&candidate);
-        return Err(error);
-    }
-    let backup = parent.join(format!("{}.{stamp}.mihomo-tui.bak", file_name(target)?));
-    if let Err(error) = fs::copy(target, &backup) {
-        let _ = fs::remove_file(&candidate);
-        return Err(error.to_string());
-    }
-    if let Err(error) = restrict_backup_permissions(&backup) {
-        let _ = fs::remove_file(&candidate);
-        let _ = fs::remove_file(&backup);
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&candidate, target) {
-        let _ = fs::remove_file(&candidate);
-        let _ = fs::remove_file(&backup);
-        return Err(error.to_string());
-    }
-    sync_directory(parent)?;
-    Ok(backup)
+    let result = validate(&candidate, parent);
+    let cleanup =
+        fs::remove_file(&candidate).map_err(|error| format!("无法清理 Mihomo 校验候选：{error}"));
+    result.and(cleanup)
 }
 
 fn validation_diagnostic(output: &std::process::Output) -> String {
@@ -1086,28 +1048,6 @@ fn validation_diagnostic(output: &std::process::Output) -> String {
         ("", stderr) => stderr.into(),
         (stdout, stderr) => format!("{stderr}\n{stdout}"),
     }
-}
-
-pub fn restore_backup(path: &Path, backup: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "config path has no parent directory".to_string())?;
-    let content = fs::read(backup).map_err(|error| error.to_string())?;
-    let permissions = fs::metadata(path)
-        .or_else(|_| fs::metadata(backup))
-        .map_err(|error| error.to_string())?
-        .permissions();
-    let candidate = parent.join(format!(
-        ".mihomo-tui-restore-{}-{}.yaml",
-        std::process::id(),
-        unique_stamp()?
-    ));
-    write_new_file(&candidate, &content, permissions)?;
-    if let Err(error) = fs::rename(&candidate, path) {
-        let _ = fs::remove_file(&candidate);
-        return Err(error.to_string());
-    }
-    sync_directory(parent)
 }
 
 fn unique_stamp() -> Result<u128, String> {

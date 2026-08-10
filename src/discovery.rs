@@ -1,8 +1,5 @@
 use serde::Deserialize;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
@@ -17,21 +14,8 @@ struct MihomoConfig {
     secret: Option<String>,
 }
 
-pub fn discover(explicit_path: Option<&Path>) -> Option<ConnectionInfo> {
-    if let Some(path) = explicit_path {
-        return read_config(path);
-    }
-    let mut candidates = Vec::new();
-    candidates.extend([
-        PathBuf::from("/etc/mihomo/config.yaml"),
-        PathBuf::from("/etc/mihomo/config.yml"),
-    ]);
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home).join(".config/mihomo");
-        candidates.push(home.join("config.yaml"));
-        candidates.push(home.join("config.yml"));
-    }
-    candidates.into_iter().find_map(|path| read_config(&path))
+pub fn discover(path: &Path) -> Option<ConnectionInfo> {
+    read_config(path)
 }
 
 fn read_config(path: &Path) -> Option<ConnectionInfo> {
@@ -108,7 +92,7 @@ mod tests {
                 .as_nanos()
         ));
 
-        assert!(discover(Some(&missing)).is_none());
+        assert!(discover(&missing).is_none());
     }
 
     #[test]

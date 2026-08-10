@@ -1,107 +1,113 @@
-# Independent Configuration
+# Single Configuration
 
 ## Goal
 
-`mihomo-tui` owns a versioned configuration source that can be opened and edited
-without Mihomo being installed, running, or reachable. Mihomo is an optional
-runtime backend and is only required when the user explicitly applies the
-configuration.
+`mihomo-tui` owns exactly one configuration file:
 
-## Files And Ownership
+```text
+/etc/mihomo-tui/config.yaml
+```
 
-- The default source is `/etc/mihomo-tui/config.yaml`.
-- The default Mihomo runtime target is `/etc/mihomo/config.yaml`.
-- `mihomo-tui` reads and edits the source during normal use.
-- Mihomo reads the runtime target.
-- Normal edits never write the runtime target, reload a service, install Mihomo,
-  or call the Mihomo executable.
+The file is native Mihomo YAML. Both `mihomo-tui` and the managed Mihomo service
+read the same file. There is no generated runtime copy and no second
+mihomo-tui-owned profile.
 
-The source format is:
+Mihomo remains an optional runtime backend. The TUI can open and edit the file
+while Mihomo is stopped, missing, or unreachable.
+
+## File Ownership
+
+- Normal reads and edits use `/etc/mihomo-tui/config.yaml`.
+- Subscription, rule, TUN, and DNS changes are written directly to that file.
+- Source backups are created beside it with mode `0600`.
+- The managed Mihomo service uses `/etc/mihomo-tui` as its data directory, so it
+  reads the same `config.yaml` directly.
+- `/etc/mihomo/config.yaml` is not synchronized, generated, or updated.
+
+Unknown and custom Mihomo fields must survive every edit.
+
+## First-Run Migration
+
+When `/etc/mihomo-tui/config.yaml` does not exist, initialization follows this
+order:
+
+1. Import an explicitly selected legacy config when one was supplied.
+2. Otherwise import `/etc/mihomo/config.yaml` when it exists.
+3. Otherwise create a minimal native Mihomo config.
+
+Import copies the complete YAML mapping without changing or deleting the legacy
+file. Once the new file exists, initialization never imports again.
+
+Early builds stored this wrapper:
 
 ```yaml
 kind: mihomo-tui/v1
 backend: mihomo
 profile:
-  # Complete Mihomo YAML mapping
+  # Mihomo YAML
 ```
 
-The complete Mihomo document lives under `profile`. Import and subsequent edits
-must preserve fields that `mihomo-tui` does not understand.
+Initialization automatically replaces that wrapper with its complete `profile`
+mapping and keeps a private backup. This is a one-time format migration.
 
-## First-Run Migration
-
-When the source does not exist, initialization follows this order:
-
-1. Import an explicitly selected legacy/runtime config when one was supplied.
-2. Otherwise import the default runtime target when it exists.
-3. Otherwise create a minimal editable profile.
-
-Initialization creates the source atomically with mode `0600`. It never replaces
-an existing source, even when a newer or different runtime target exists. An
-import copies the full YAML mapping into `profile`; it does not move, rewrite, or
-delete the original file.
-
-Malformed YAML, a non-mapping legacy root, an unsupported source `kind`, or an
-unsupported `backend` stops initialization with an actionable error. No partial
-source is left behind.
+The config file is created atomically with mode `0600`. A malformed YAML file,
+non-mapping root, unsupported wrapper, symlink source, or symlink config
+directory stops initialization without leaving a partial file.
 
 ## Offline Editing
 
-Configuration reads accept the versioned source format. Legacy raw Mihomo YAML
-remains readable for compatibility with explicit/external workflows and tests.
-All editor operations update only the profile mapping and preserve the wrapper
-metadata and unmanaged profile fields.
+Every editor operation parses the native YAML, changes only its owned fields,
+preserves unmanaged fields, and atomically replaces the same config file. The
+previous version is retained as a mode-`0600` backup.
 
-Each edit is a syntax-checked atomic write. The previous source is retained as a
-mode-`0600` backup. Editing has no dependency on a Mihomo binary or controller.
+Editing never installs or starts Mihomo and never calls the Mihomo executable.
+The UI reports that the file is saved and, for a managed local backend, whether
+the running core still needs to reload it.
 
-The UI reports whether the source profile equals the runtime target:
+## Apply And Reload
 
-- `已应用`: the normalized YAML values are equal.
-- `待应用`: the target is missing, unreadable, or differs from the source.
+Pressing `p` is a runtime action, not a file synchronization action. For the
+managed local backend it performs:
 
-## Explicit Apply
+1. Prepare or optionally install Mihomo without starting an existing stopped
+   service on another config.
+2. Validate `/etc/mihomo-tui/config.yaml` with the trusted Mihomo executable.
+3. Install a root-owned systemd drop-in that sets Mihomo's data directory to
+   `/etc/mihomo-tui`.
+4. Reload systemd and run `systemctl reload-or-restart mihomo.service`.
+5. Refresh configured HTTP providers and verify that they return nodes.
 
-Applying is a separate user command. For the managed local backend it performs:
+Validation failure leaves the saved config available for correction and does
+not reload the service. The managed drop-in is the only supported override;
+unknown service drop-ins are rejected rather than overwritten.
 
-1. Read and validate the source wrapper.
-2. Serialize only `profile` as a candidate runtime config.
-3. Ensure the managed Mihomo runtime is available when automatic installation is
-   enabled, without starting an existing stopped service on the old config.
-4. Validate the candidate with the trusted Mihomo executable.
-5. Atomically replace the runtime target while retaining a mode-`0600` backup.
-6. Reload or restart `mihomo.service`.
-7. Refresh configured HTTP providers and verify that each returns nodes.
-
-If candidate validation fails, the runtime target is unchanged. If the service
-reload fails, the target is rolled back and the restored version is reloaded.
-Source edits are never rolled back by an apply failure.
-
-External controller mode does not manage a local service. Its source remains
-editable, but local apply is unavailable.
+External controller or explicit legacy-config mode never manages local systemd.
+Its config remains editable, but local apply is unavailable.
 
 ## Command-Line Contract
 
-- `--workspace` / `MIHOMO_TUI_CONFIG` selects the independent source.
-- `--config` / `MIHOMO_CONFIG` selects a legacy/runtime config to import on first
-  use and compare with the source. Explicit configs are treated as external and
-  never cause local systemd management.
+- `--workspace` / `MIHOMO_TUI_CONFIG` selects the single owned config. The
+  default is `/etc/mihomo-tui/config.yaml`. An explicit custom path is external
+  mode and never changes local systemd.
+- `--config` / `MIHOMO_CONFIG` selects a legacy config used only for the first
+  import. Supplying it selects external mode and never manages local systemd.
 - `--controller` / `MIHOMO_CONTROLLER` and `--secret` / `MIHOMO_SECRET` override
-  controller discovery without changing either file.
-- `--no-auto-install` prevents installation during apply. It does not affect
-  startup or offline editing because those operations never install Mihomo.
+  controller discovery without changing the config file.
+- `--no-auto-install` prevents installation during `p`. It does not affect
+  startup or offline editing.
 
 ## Acceptance Criteria
 
-- The TUI opens and permits subscription, rule, TUN, and DNS edits while Mihomo
-  is stopped, absent, or unreachable.
-- A first import preserves unknown nested fields and leaves the legacy file byte
-  for byte unchanged.
-- An existing source is never overwritten by initialization.
-- Source files and backups are mode `0600` on Unix.
-- Saving a new subscription URL succeeds without invoking Mihomo and remains
-  present after reopening the TUI.
-- The runtime target does not change until the explicit apply command.
-- Validation or reload failure cannot leave a broken runtime target in place.
-- The UI exposes source path, runtime path, and applied/pending state without
-  displaying subscription credentials or the API secret.
+- The TUI opens and saves configuration while Mihomo is stopped, absent, or
+  unreachable.
+- Adding or replacing a subscription changes
+  `/etc/mihomo-tui/config.yaml` directly.
+- No edit or apply writes `/etc/mihomo/config.yaml`.
+- A first import preserves unknown nested fields and leaves the imported file
+  byte for byte unchanged.
+- Existing wrapped workspaces migrate without losing profile fields.
+- The single config and its backups are mode `0600` on Unix.
+- Managed Mihomo starts and reloads with `/etc/mihomo-tui` as its data directory.
+- Validation happens only when explicitly applying and cannot block offline
+  editing.
+- The UI does not display subscription credentials or the API secret.

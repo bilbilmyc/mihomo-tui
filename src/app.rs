@@ -22,10 +22,9 @@ pub struct App {
     selected_proxy_member_index: usize,
     config: ConfigSnapshot,
     config_path: Option<PathBuf>,
-    runtime_path: Option<PathBuf>,
     config_reload: ConfigReload,
     auto_install: bool,
-    config_pending: bool,
+    reload_pending: bool,
     add_provider: Option<AddProviderDialog>,
     settings_dialog: Option<SettingsDialog>,
     rule_dialog: Option<RuleDialog>,
@@ -210,7 +209,7 @@ impl AddProviderDialog {
 
 enum ProviderRefreshContext {
     Manual,
-    AfterApply { backup: PathBuf },
+    AfterApply,
 }
 
 struct ProviderRefreshData {
@@ -234,7 +233,7 @@ enum WorkerResult {
         context: ProviderRefreshContext,
         result: Result<ProviderRefreshData, String>,
     },
-    ConfigApplied(Result<PathBuf, String>),
+    ConfigApplied(Result<(), String>),
 }
 
 impl App {
@@ -254,14 +253,13 @@ impl App {
         config_path: Option<PathBuf>,
         config_reload: ConfigReload,
     ) -> Self {
-        Self::with_workspace(controller, secret, config_path, None, config_reload, false)
+        Self::with_workspace(controller, secret, config_path, config_reload, false)
     }
 
     pub fn with_workspace(
         controller: Option<String>,
         secret: Option<String>,
         config_path: Option<PathBuf>,
-        runtime_path: Option<PathBuf>,
         config_reload: ConfigReload,
         auto_install: bool,
     ) -> Self {
@@ -293,12 +291,7 @@ impl App {
             state.status = "正在连接 Mihomo...".into();
         }
         let (worker_tx, worker_rx) = mpsc::channel();
-        let config_pending = match (config_path.as_deref(), runtime_path.as_deref()) {
-            (Some(source), Some(target)) => {
-                !crate::workspace::source_matches_runtime(source, target).unwrap_or(false)
-            }
-            _ => false,
-        };
+        let reload_pending = config_reload == ConfigReload::LocalSystemd;
         Self {
             state,
             client,
@@ -307,10 +300,9 @@ impl App {
             selected_proxy_member_index: 0,
             config,
             config_path,
-            runtime_path,
             config_reload,
             auto_install,
-            config_pending,
+            reload_pending,
             add_provider: None,
             settings_dialog: None,
             rule_dialog: None,
@@ -366,8 +358,8 @@ impl App {
                     match result {
                         Ok(proxies) => apply_proxy_refresh(&mut self.state, proxies),
                         Err(error) => {
-                            self.state.status = if self.config_pending {
-                                format!("API 错误：{error}；独立配置待应用（按 p）")
+                            self.state.status = if self.reload_pending {
+                                format!("API 错误：{error}；配置已保存，核心待重载（按 p）")
                             } else {
                                 format!("API 错误：{error}")
                             }
@@ -424,17 +416,13 @@ impl App {
                                 ProviderRefreshContext::Manual => {
                                     format!("已更新 {name}，获取 {} 个节点", data.node_count)
                                 }
-                                ProviderRefreshContext::AfterApply { backup } => {
+                                ProviderRefreshContext::AfterApply => {
                                     if data.node_count == 0 {
-                                        format!(
-                                            "配置已应用，但 {name} 未返回节点；运行配置备份 {}",
-                                            backup.display()
-                                        )
+                                        format!("核心已重载，但 {name} 未返回节点")
                                     } else {
                                         format!(
-                                            "配置已应用；{name} 获取 {} 个节点；运行配置备份 {}",
-                                            data.node_count,
-                                            backup.display()
+                                            "核心已重载；{name} 获取 {} 个节点",
+                                            data.node_count
                                         )
                                     }
                                 }
@@ -448,20 +436,18 @@ impl App {
                             ProviderRefreshContext::Manual => {
                                 self.state.status = format!("订阅更新失败：{error}")
                             }
-                            ProviderRefreshContext::AfterApply { backup } => {
-                                self.state.status = format!(
-                                    "配置已应用，但 {name} 订阅验证失败：{error}；运行配置备份 {}",
-                                    backup.display()
-                                )
+                            ProviderRefreshContext::AfterApply => {
+                                self.state.status =
+                                    format!("核心已重载，但 {name} 订阅验证失败：{error}")
                             }
                         },
                     }
                 }
                 WorkerResult::ConfigApplied(result) => {
                     self.apply_in_flight = false;
-                    self.refresh_pending_state();
                     match result {
-                        Ok(backup) => {
+                        Ok(()) => {
+                            self.reload_pending = false;
                             let providers = self
                                 .config
                                 .providers
@@ -470,27 +456,23 @@ impl App {
                                 .map(|provider| provider.name.clone())
                                 .collect::<Vec<_>>();
                             if providers.is_empty() {
-                                self.state.status =
-                                    format!("配置已应用；运行配置备份 {}", backup.display());
+                                self.state.status = "唯一配置已校验，Mihomo 核心已重载".into();
                             } else if self.client.is_none() {
-                                self.state.status = format!(
-                                    "配置已应用，但未连接 Mihomo 控制器，无法验证订阅；运行配置备份 {}",
-                                    backup.display()
-                                );
+                                self.state.status =
+                                    "核心已重载，但未连接控制器，无法验证订阅".into();
                             } else {
                                 self.state.status =
-                                    format!("配置已应用，正在验证 {} 个订阅...", providers.len());
+                                    format!("核心已重载，正在验证 {} 个订阅...", providers.len());
                                 for name in providers {
                                     self.start_provider_refresh(
                                         name,
-                                        ProviderRefreshContext::AfterApply {
-                                            backup: backup.clone(),
-                                        },
+                                        ProviderRefreshContext::AfterApply,
                                     );
                                 }
                             }
                         }
                         Err(error) => {
+                            self.reload_pending = true;
                             self.state.status = format!("配置应用失败：{error}");
                         }
                     }
@@ -760,7 +742,8 @@ impl App {
                 Ok(()) => {
                     self.settings_dialog = None;
                     let mut status = format!(
-                        "高级设置已保存到独立配置；按 p 应用；备份 {}",
+                        "高级设置已保存到唯一配置{}；备份 {}",
+                        self.reload_hint(),
                         backup.display()
                     );
                     if tun_enabling {
@@ -882,7 +865,8 @@ impl App {
                     let action = if updating { "已更新" } else { "已新增" };
                     self.add_provider = None;
                     self.state.status = format!(
-                        "{action} {name}，已保存到独立配置；按 p 应用；备份 {}",
+                        "{action} {name}，已保存到唯一配置{}；备份 {}",
+                        self.reload_hint(),
                         backup.display()
                     );
                 }
@@ -902,27 +886,28 @@ impl App {
         self.state.status = error;
     }
 
+    fn reload_hint(&self) -> &'static str {
+        if self.config_reload == ConfigReload::LocalSystemd {
+            "；按 p 重载核心"
+        } else {
+            "；外部核心需自行重载"
+        }
+    }
+
     fn finalize_config_change(&mut self, _backup: &Path) -> Result<(), String> {
         let path = self
             .config_path
             .clone()
-            .ok_or_else(|| "未发现独立配置路径".to_string())?;
+            .ok_or_else(|| "未发现唯一配置路径".to_string())?;
         config::load(&path)
             .map(|snapshot| {
                 apply_config(&mut self.state, &snapshot);
                 self.config = snapshot;
-                self.refresh_pending_state();
+                if self.config_reload == ConfigReload::LocalSystemd {
+                    self.reload_pending = true;
+                }
             })
-            .map_err(|error| format!("独立配置已保存，但重新读取失败：{error}"))
-    }
-
-    fn refresh_pending_state(&mut self) {
-        self.config_pending = match (self.config_path.as_deref(), self.runtime_path.as_deref()) {
-            (Some(source), Some(target)) => {
-                !crate::workspace::source_matches_runtime(source, target).unwrap_or(false)
-            }
-            _ => false,
-        };
+            .map_err(|error| format!("唯一配置已保存，但重新读取失败：{error}"))
     }
 
     fn apply_workspace(&mut self) {
@@ -931,32 +916,27 @@ impl App {
             return;
         }
         if self.config_reload != ConfigReload::LocalSystemd {
-            self.state.status = "本地应用不可用：当前只连接外部控制器，独立配置仍可离线编辑".into();
+            self.state.status = "本地重载不可用：当前只连接外部控制器，唯一配置仍可离线编辑".into();
             return;
         }
         let Some(source) = self.config_path.clone() else {
-            self.state.status = "本地应用不可用：未发现独立配置路径".into();
+            self.state.status = "本地重载不可用：未发现唯一配置路径".into();
             return;
         };
-        let Some(target) = self.runtime_path.clone() else {
-            self.state.status = "本地应用不可用：未配置运行时目标".into();
-            return;
-        };
-        if !self.config_pending {
-            self.state.status = "独立配置已经应用，无需重复操作".into();
+        if !self.reload_pending {
+            self.state.status = "Mihomo 核心已加载当前配置，无需重复操作".into();
             return;
         }
         self.apply_in_flight = true;
-        self.state.status = "正在校验并应用独立配置...".into();
+        self.state.status = "正在校验唯一配置并重载核心...".into();
         let sender = self.worker_tx.clone();
         let auto_install = self.auto_install;
         thread::spawn(move || {
             let result =
                 crate::runtime::ensure(crate::runtime::RuntimeMode::ManagedLocal, auto_install)
-                    .and_then(|()| config::apply_to_runtime(&source, &target))
-                    .and_then(|backup| {
-                        reload_or_rollback(&target, &backup, reload_mihomo_service).map(|()| backup)
-                    });
+                    .and_then(|()| config::validate_for_runtime(&source))
+                    .and_then(|()| crate::runtime::configure_workspace_service(&source))
+                    .and_then(|()| reload_mihomo_service());
             let _ = sender.send(WorkerResult::ConfigApplied(result));
         });
     }
@@ -1115,11 +1095,11 @@ impl App {
             };
         }
         match (self.state.page, self.proxy_members_focused) {
-            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  p 应用配置  r 刷新  q 退出",
-            (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 应用配置  r 刷新  q 退出",
-            (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 应用配置  Left 返回",
-            (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 应用",
-            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  p 应用",
+            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  p 重载核心  r 刷新  q 退出",
+            (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重载核心  r 刷新  q 退出",
+            (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重载核心  Left 返回",
+            (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重载",
+            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  p 重载",
         }
     }
 
@@ -1128,25 +1108,18 @@ impl App {
             ListItem::new("核心       Mihomo API"),
             ListItem::new(format!("控制器     {}", self.state.controller)),
             ListItem::new(format!(
-                "独立配置   {}",
+                "唯一配置   {}",
                 self.config_path
                     .as_deref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "未发现".into())
             )),
             ListItem::new(format!(
-                "运行配置   {}",
-                self.runtime_path
-                    .as_deref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "未配置".into())
-            )),
-            ListItem::new(format!(
-                "配置状态   {}",
-                if self.config_pending {
-                    "待应用（按 p）"
+                "核心加载   {}",
+                if self.reload_pending {
+                    "待重载（按 p）"
                 } else {
-                    "已应用"
+                    "已加载当前配置"
                 }
             )),
             ListItem::new(format!("模式       {}", self.config.mode)),
@@ -1352,8 +1325,11 @@ impl App {
         match config::save_rules(path, &rules) {
             Ok(backup) => match self.finalize_config_change(&backup) {
                 Ok(()) => {
-                    self.state.status =
-                        format!("规则已保存到独立配置；按 p 应用；备份 {}", backup.display())
+                    self.state.status = format!(
+                        "规则已保存到唯一配置{}；备份 {}",
+                        self.reload_hint(),
+                        backup.display()
+                    )
                 }
                 Err(error) => self.state.status = format!("规则读取失败：{error}"),
             },
@@ -1366,8 +1342,8 @@ impl App {
             self.state.status = "订阅更新正在进行...".into();
             return;
         }
-        if self.config_pending {
-            self.state.status = "独立配置待应用；请先按 p 应用，再更新订阅".into();
+        if self.reload_pending {
+            self.state.status = "配置已保存；请先按 p 重载核心，再更新订阅".into();
             return;
         }
         let Some(provider) = self.config.providers.get(self.state.selected) else {
@@ -1602,26 +1578,6 @@ fn draw_empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str, c
 
 fn reload_mihomo_service() -> Result<(), String> {
     crate::runtime::reload_service()
-}
-
-fn reload_or_rollback<F>(path: &Path, backup: &Path, mut reload: F) -> Result<(), String>
-where
-    F: FnMut() -> Result<(), String>,
-{
-    let reload_error = match reload() {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    config::restore_backup(path, backup)
-        .map_err(|error| format!("重载失败（{reload_error}），回滚配置也失败：{error}"))?;
-    match reload() {
-        Ok(()) => Err(format!(
-            "重载失败（{reload_error}）；配置已回滚到修改前版本"
-        )),
-        Err(rollback_error) => Err(format!(
-            "重载失败（{reload_error}）；配置已在磁盘回滚，但恢复版本重载失败（{rollback_error}）"
-        )),
-    }
 }
 
 fn provider_url_label(raw: &str) -> String {
@@ -1920,15 +1876,14 @@ mod tests {
     }
 
     #[test]
-    fn subscription_edits_stay_in_the_workspace_until_explicit_apply() {
-        let (directory, source, target) = workspace_test_config("provider-pending");
-        let runtime_before = fs::read_to_string(&target).unwrap();
+    fn subscription_edits_are_written_to_the_single_owned_config() {
+        let (directory, source, imported) = workspace_test_config("provider-single-config");
+        let imported_before = fs::read_to_string(&imported).unwrap();
         let mut app = App::with_workspace(
             None,
             None,
-            Some(source),
-            Some(target.clone()),
-            ConfigReload::None,
+            Some(source.clone()),
+            ConfigReload::LocalSystemd,
             false,
         );
         app.state.page = Page::Config;
@@ -1943,33 +1898,30 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(fs::read_to_string(&target).unwrap(), runtime_before);
-        assert!(app.config_pending);
-        assert!(app.state.status.contains("已保存到独立配置"));
-        assert!(app.state.status.contains("p"));
+        let saved = fs::read_to_string(&source).unwrap();
+        assert!(saved.contains("https://subscriptions.example.com/private"));
+        assert_eq!(fs::read_to_string(&imported).unwrap(), imported_before);
+        assert!(app.reload_pending);
+        assert!(app.state.status.contains("已保存到唯一配置"));
+        assert!(app.state.status.contains("重载核心"));
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn dashboard_shows_both_config_paths_and_pending_state() {
-        let (directory, source, target) = workspace_test_config("dashboard-pending");
-        let mut app = App::with_workspace(
-            None,
-            None,
-            Some(source),
-            Some(target),
-            ConfigReload::None,
-            false,
-        );
-        app.config_pending = true;
+    fn dashboard_shows_one_config_path_and_core_reload_state() {
+        let (directory, source, _) = workspace_test_config("dashboard-single-config");
+        let mut app =
+            App::with_workspace(None, None, Some(source), ConfigReload::LocalSystemd, false);
+        app.reload_pending = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("独立配置"), "{screen}");
-        assert!(screen.contains("运行配置"), "{screen}");
-        assert!(screen.contains("待应用"), "{screen}");
+        assert!(screen.contains("唯一配置"), "{screen}");
+        assert!(!screen.contains("运行配置"), "{screen}");
+        assert!(screen.contains("核心加载"), "{screen}");
+        assert!(screen.contains("待重载"), "{screen}");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1986,7 +1938,7 @@ mod tests {
     fn pending_subscription_is_not_refreshed_against_the_old_runtime() {
         let mut app = App::new(Some("http://127.0.0.1:9090".into()), None, None);
         app.state.page = Page::Config;
-        app.config_pending = true;
+        app.reload_pending = true;
         app.config.providers = vec![crate::config::Provider {
             name: "airport".into(),
             kind: "http".into(),
@@ -1998,62 +1950,21 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
         assert_eq!(app.provider_refresh_in_flight, 0);
-        assert!(app.state.status.contains("先按 p 应用"));
+        assert!(app.state.status.contains("先按 p 重载核心"));
     }
 
     #[test]
     fn apply_key_does_not_reload_an_already_applied_config() {
-        let (directory, source, target) = workspace_test_config("already-applied");
-        let mut app = App::with_workspace(
-            None,
-            None,
-            Some(source),
-            Some(target),
-            ConfigReload::LocalSystemd,
-            false,
-        );
-        assert!(!app.config_pending);
+        let (directory, source, _) = workspace_test_config("already-loaded");
+        let mut app =
+            App::with_workspace(None, None, Some(source), ConfigReload::LocalSystemd, false);
+        app.reload_pending = false;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
 
         assert!(!app.apply_in_flight);
         assert!(app.state.status.contains("无需重复"));
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn reload_failure_restores_the_previous_config() {
-        let unique = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "mihomo-tui-rollback-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("config.yaml");
-        let backup = directory.join("config.yaml.bak");
-        fs::write(&path, "new config").unwrap();
-        fs::write(&backup, "old config").unwrap();
-        let mut attempts = 0;
-
-        let error = reload_or_rollback(&path, &backup, || {
-            attempts += 1;
-            if attempts == 1 {
-                Err("reload rejected".into())
-            } else {
-                Ok(())
-            }
-        })
-        .unwrap_err();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), "old config");
-        assert_eq!(attempts, 2);
-        assert!(error.contains("回滚"));
-        fs::remove_file(path).unwrap();
-        fs::remove_file(backup).unwrap();
-        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -2206,8 +2117,8 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.add_provider.is_none());
-        assert!(app.state.status.contains("已保存到独立配置"));
-        assert!(app.state.status.contains("按 p 应用"));
+        assert!(app.state.status.contains("已保存到唯一配置"));
+        assert!(app.state.status.contains("外部核心需自行重载"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2229,9 +2140,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.provider_refresh_in_flight, 0);
         app.worker_tx
-            .send(WorkerResult::ConfigApplied(Ok(
-                directory.join("runtime-config.bak")
-            )))
+            .send(WorkerResult::ConfigApplied(Ok(())))
             .unwrap();
         for _ in 0..100 {
             app.process_worker_results();
@@ -2242,7 +2151,7 @@ mod tests {
         }
 
         assert!(app.add_provider.is_none());
-        assert!(app.state.status.contains("配置已应用"));
+        assert!(app.state.status.contains("核心已重载"));
         assert!(app.state.status.contains("获取 2 个节点"));
         assert_eq!(app.state.proxies[0].name, "Main");
         assert_eq!(server.join().unwrap(), 3);
@@ -2267,9 +2176,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.provider_refresh_in_flight, 0);
         app.worker_tx
-            .send(WorkerResult::ConfigApplied(Ok(
-                directory.join("runtime-config.bak")
-            )))
+            .send(WorkerResult::ConfigApplied(Ok(())))
             .unwrap();
         for _ in 0..100 {
             app.process_worker_results();
@@ -2279,7 +2186,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(app.state.status.contains("配置已应用"));
+        assert!(app.state.status.contains("核心已重载"));
         assert!(app.state.status.contains("订阅验证失败"));
         server.join().unwrap();
         fs::remove_dir_all(directory).unwrap();

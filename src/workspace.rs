@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -11,13 +12,14 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub const WORKSPACE_KIND: &str = "mihomo-tui/v1";
 pub const WORKSPACE_BACKEND: &str = "mihomo";
 pub const DEFAULT_SOURCE_PATH: &str = "/etc/mihomo-tui/config.yaml";
-pub const DEFAULT_RUNTIME_PATH: &str = "/etc/mihomo/config.yaml";
+pub const DEFAULT_IMPORT_PATH: &str = "/etc/mihomo/config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Initialization {
     Existing,
     Imported(PathBuf),
     Created,
+    MigratedWrapper(PathBuf),
 }
 
 pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization, String> {
@@ -28,7 +30,17 @@ pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization
                 source.display()
             ));
         }
-        read_workspace_document(source)?;
+        let document = read_document(source, "独立配置")?;
+        if has_workspace_kind(
+            document
+                .as_mapping()
+                .ok_or_else(|| "独立配置根节点必须是映射".to_string())?,
+        ) {
+            let profile = workspace_profile(&document)?.clone();
+            let backup = replace_with_native_profile(source, &profile)?;
+            return Ok(Initialization::MigratedWrapper(backup));
+        }
+        require_mapping(&document, "独立配置")?;
         restrict_source_permissions(source)?;
         return Ok(Initialization::Existing);
     }
@@ -40,36 +52,23 @@ pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization
         ),
         None => (default_profile()?, Initialization::Created),
     };
-    let document = wrap_profile(profile);
     let content =
-        serde_yaml::to_string(&document).map_err(|error| format!("无法序列化独立配置：{error}"))?;
+        serde_yaml::to_string(&profile).map_err(|error| format!("无法序列化独立配置：{error}"))?;
     create_source(source, content.as_bytes())?;
     Ok(result)
 }
 
-pub fn read_workspace_document(path: &Path) -> Result<Value, String> {
+fn read_document(path: &Path, label: &str) -> Result<Value, String> {
     let content = fs::read_to_string(path)
-        .map_err(|error| format!("无法读取独立配置 {}：{error}", path.display()))?;
+        .map_err(|error| format!("无法读取{label} {}：{error}", path.display()))?;
     let document: Value = serde_yaml::from_str(&content)
-        .map_err(|error| format!("独立配置 {} 不是有效 YAML：{error}", path.display()))?;
-    workspace_profile(&document)?;
+        .map_err(|error| format!("{label} {} 不是有效 YAML：{error}", path.display()))?;
     Ok(document)
 }
 
 pub fn load_profile(path: &Path) -> Result<Value, String> {
-    let document = read_workspace_document(path)?;
-    Ok(workspace_profile(&document)?.clone())
-}
-
-pub fn source_matches_runtime(source: &Path, target: &Path) -> Result<bool, String> {
-    let profile = load_profile(source)?;
-    let Ok(content) = fs::read_to_string(target) else {
-        return Ok(false);
-    };
-    let Ok(runtime): Result<Value, _> = serde_yaml::from_str(&content) else {
-        return Ok(false);
-    };
-    Ok(runtime.as_mapping().is_some() && runtime == profile)
+    let document = read_document(path, "配置")?;
+    Ok(config_profile(&document)?.clone())
 }
 
 pub fn config_profile(document: &Value) -> Result<&Value, String> {
@@ -106,28 +105,17 @@ fn has_workspace_kind(root: &Mapping) -> bool {
 }
 
 fn read_raw_profile(path: &Path) -> Result<Value, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("无法读取待导入配置 {}：{error}", path.display()))?;
-    let profile: Value = serde_yaml::from_str(&content)
-        .map_err(|error| format!("待导入配置 {} 不是有效 YAML：{error}", path.display()))?;
-    if profile.as_mapping().is_none() {
-        return Err(format!("待导入配置 {} 的根节点必须是映射", path.display()));
-    }
+    let profile = read_document(path, "待导入配置")?;
+    require_mapping(&profile, "待导入配置")?;
     Ok(profile)
 }
 
-fn wrap_profile(profile: Value) -> Value {
-    let mut document = Mapping::new();
-    document.insert(
-        Value::String("kind".into()),
-        Value::String(WORKSPACE_KIND.into()),
-    );
-    document.insert(
-        Value::String("backend".into()),
-        Value::String(WORKSPACE_BACKEND.into()),
-    );
-    document.insert(Value::String("profile".into()), profile);
-    Value::Mapping(document)
+fn require_mapping(document: &Value, label: &str) -> Result<(), String> {
+    if document.as_mapping().is_some() {
+        Ok(())
+    } else {
+        Err(format!("{label}的根节点必须是映射"))
+    }
 }
 
 fn workspace_profile(document: &Value) -> Result<&Value, String> {
@@ -179,6 +167,46 @@ rules:
     .map_err(|error| format!("无法创建默认配置：{error}"))
 }
 
+fn replace_with_native_profile(path: &Path, profile: &Value) -> Result<PathBuf, String> {
+    let content = serde_yaml::to_string(profile)
+        .map_err(|error| format!("无法序列化迁移后的配置：{error}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("独立配置路径 {} 没有父目录", path.display()))?;
+    let stamp = unique_stamp()?;
+    let candidate = parent.join(format!(
+        ".mihomo-tui-migrate-{}-{stamp}.yaml",
+        std::process::id()
+    ));
+    create_private_file(&candidate, content.as_bytes())?;
+    let backup = parent.join(format!("config.yaml.{stamp}.wrapped.bak"));
+    if let Err(error) = fs::copy(path, &backup) {
+        let _ = fs::remove_file(&candidate);
+        return Err(format!("无法备份旧包装配置：{error}"));
+    }
+    if let Err(error) = restrict_source_permissions(&backup) {
+        let _ = fs::remove_file(&candidate);
+        let _ = fs::remove_file(&backup);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&candidate, path) {
+        let _ = fs::remove_file(&candidate);
+        let _ = fs::remove_file(&backup);
+        return Err(format!("无法迁移独立配置：{error}"));
+    }
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("无法同步独立配置目录：{error}"))?;
+    Ok(backup)
+}
+
+fn unique_stamp() -> Result<u128, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| error.to_string())
+}
+
 fn create_source(path: &Path, content: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -200,18 +228,23 @@ fn create_source(path: &Path, content: &[u8]) -> Result<(), String> {
             .map_err(|error| format!("无法设置独立配置目录权限 {}：{error}", parent.display()))?;
     }
 
+    create_private_file(path, content)?;
+    restrict_source_permissions(path)
+}
+
+fn create_private_file(path: &Path, content: &[u8]) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options
         .open(path)
-        .map_err(|error| format!("无法创建独立配置 {}：{error}", path.display()))?;
+        .map_err(|error| format!("无法创建配置文件 {}：{error}", path.display()))?;
     if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(path);
-        return Err(format!("无法写入独立配置 {}：{error}", path.display()));
+        return Err(format!("无法写入配置文件 {}：{error}", path.display()));
     }
-    restrict_source_permissions(path)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -262,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_the_complete_legacy_mapping_without_changing_it() {
+    fn imports_the_complete_legacy_mapping_as_the_native_config() {
         let directory = TestDirectory::new("import");
         let legacy = directory.join("legacy.yaml");
         let source = directory.join("workspace/config.yaml");
@@ -284,13 +317,9 @@ rules: [MATCH,DIRECT]
         assert_eq!(result, Initialization::Imported(legacy.clone()));
         assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_content);
         let document: Value = serde_yaml::from_str(&fs::read_to_string(&source).unwrap()).unwrap();
-        assert_eq!(document["kind"], WORKSPACE_KIND);
-        assert_eq!(document["backend"], WORKSPACE_BACKEND);
-        assert_eq!(document["profile"]["secret"], "private");
-        assert_eq!(
-            document["profile"]["experimental"]["custom-feature"]["enabled"],
-            true
-        );
+        assert_eq!(document["secret"], "private");
+        assert_eq!(document["experimental"]["custom-feature"]["enabled"], true);
+        assert!(document.get("profile").is_none());
     }
 
     #[test]
@@ -298,12 +327,7 @@ rules: [MATCH,DIRECT]
         let directory = TestDirectory::new("existing");
         let source = directory.join("config.yaml");
         let legacy = directory.join("legacy.yaml");
-        let existing = r#"kind: mihomo-tui/v1
-backend: mihomo
-profile:
-  mixed-port: 17890
-  rules: [MATCH,DIRECT]
-"#;
+        let existing = "mixed-port: 17890\nrules: ['MATCH,DIRECT']\n";
         fs::write(&source, existing).unwrap();
         fs::write(&legacy, "mixed-port: 27890\nrules: [MATCH,DIRECT]\n").unwrap();
 
@@ -338,23 +362,30 @@ profile:
     }
 
     #[test]
-    fn compares_the_source_profile_with_the_runtime_target() {
-        let directory = TestDirectory::new("compare");
+    fn migrates_an_existing_wrapped_workspace_to_native_yaml() {
+        let directory = TestDirectory::new("wrapped-migration");
         let source = directory.join("config.yaml");
-        let target = directory.join("runtime.yaml");
         fs::write(
             &source,
-            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: rule\n  rules: [MATCH,DIRECT]\n",
+            "kind: mihomo-tui/v1\nbackend: mihomo\nprofile:\n  mode: rule\n  custom:\n    keep: true\n  rules: ['MATCH,DIRECT']\n",
         )
         .unwrap();
 
-        assert!(!source_matches_runtime(&source, &target).unwrap());
-        fs::write(&target, "rules: [MATCH,DIRECT]\nmode: rule\n").unwrap();
-        assert!(source_matches_runtime(&source, &target).unwrap());
-        fs::write(&target, "mode: global\nrules: [MATCH,DIRECT]\n").unwrap();
-        assert!(!source_matches_runtime(&source, &target).unwrap());
-        fs::write(&target, "not: [valid\n").unwrap();
-        assert!(!source_matches_runtime(&source, &target).unwrap());
+        let result = initialize(&source, None).unwrap();
+
+        let backup = match result {
+            Initialization::MigratedWrapper(backup) => backup,
+            other => panic!("unexpected initialization result: {other:?}"),
+        };
+        let document: Value = serde_yaml::from_str(&fs::read_to_string(&source).unwrap()).unwrap();
+        assert_eq!(document["mode"], "rule");
+        assert_eq!(document["custom"]["keep"], true);
+        assert!(document.get("kind").is_none());
+        assert!(
+            fs::read_to_string(&backup)
+                .unwrap()
+                .contains("mihomo-tui/v1")
+        );
     }
 
     #[test]

@@ -8,11 +8,10 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const MIHOMO_VERSION: &str = "v1.19.29";
 const MIHOMO_DEB_VERSION: &str = "1.19.29";
-const MIHOMO_CONFIG: &str = "/etc/mihomo/config.yaml";
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 const BINARY_PATHS: [&str; 2] = ["/usr/bin/mihomo", "/usr/local/bin/mihomo"];
 const UNIT_PATHS: [&str; 3] = [
@@ -20,23 +19,7 @@ const UNIT_PATHS: [&str; 3] = [
     "/usr/lib/systemd/system/mihomo.service",
     "/lib/systemd/system/mihomo.service",
 ];
-const CONFIG_PATHS: [&str; 2] = ["/etc/mihomo/config.yaml", "/etc/mihomo/config.yml"];
-const VENDOR_DEFAULT_CONFIG: &str = r#"mixed-port: 7890
-
-dns:
-  enable: true
-  ipv6: true
-  enhanced-mode: fake-ip
-  fake-ip-filter:
-    - "*"
-    - "+.lan"
-    - "+.local"
-  nameserver:
-    - system
-
-rules:
-  - MATCH,DIRECT
-"#;
+const MANAGED_DROP_IN: &str = "/etc/systemd/system/mihomo.service.d/10-mihomo-tui.conf";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -48,7 +31,6 @@ pub enum RuntimeMode {
 pub struct Inventory {
     pub binary: bool,
     pub unit: bool,
-    pub config: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,24 +49,16 @@ struct Package {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigState {
-    Ready,
-    VendorDefault,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitExpectation {
     Absent,
     Packaged,
-    PackagedOrAbsent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SystemdUnitState {
     load_state: String,
     fragment_path: Option<PathBuf>,
-    has_drop_ins: bool,
+    drop_in_paths: Vec<PathBuf>,
 }
 
 struct RuntimeLock {
@@ -95,10 +69,10 @@ pub fn plan(mode: RuntimeMode, inventory: Inventory, auto_install: bool) -> Acti
     if mode == RuntimeMode::External {
         return Action::None;
     }
-    match (inventory.binary, inventory.unit, inventory.config) {
-        (true, true, true) => Action::Prepare,
-        (false, false, false) if auto_install => Action::Install,
-        (false, false, false) => Action::None,
+    match (inventory.binary, inventory.unit) {
+        (true, true) => Action::Prepare,
+        (false, false) if auto_install => Action::Install,
+        (false, false) => Action::None,
         _ => Action::RejectPartialInstall,
     }
 }
@@ -133,8 +107,8 @@ pub(crate) fn root_required_message() -> &'static str {
 
 fn partial_install_error(inventory: Inventory) -> String {
     format!(
-        "检测到不完整的 Mihomo 安装（binary={}，service={}，config={}），为避免覆盖现有文件已停止；请修复后重试或使用 --controller",
-        inventory.binary, inventory.unit, inventory.config
+        "检测到不完整的 Mihomo 安装（binary={}，service={}），为避免覆盖现有文件已停止；请修复后重试或使用 --controller",
+        inventory.binary, inventory.unit
     )
 }
 
@@ -163,21 +137,7 @@ fn acquire_runtime_lock() -> Result<RuntimeLock, String> {
 
 fn prepare_existing_for_apply() -> Result<(), String> {
     validate_existing_install()?;
-    validate_systemd_unit(UnitExpectation::PackagedOrAbsent)?;
-    match system_config_state()? {
-        ConfigState::Ready => {}
-        ConfigState::VendorDefault => {
-            eprintln!("检测到尚未完成的 Mihomo 默认配置，正在继续初始化...");
-            configure_installed_default()?;
-        }
-        ConfigState::Unsupported => {
-            return Err(
-                "系统 Mihomo 配置缺少 external-controller，且不是可安全续作的官方默认配置；拒绝自动修改"
-                    .into(),
-            );
-        }
-    }
-    daemon_reload()
+    validate_systemd_unit(UnitExpectation::Packaged)
 }
 
 pub fn reload_service() -> Result<(), String> {
@@ -211,11 +171,84 @@ pub fn validate_config(candidate: &Path, data_dir: &Path) -> Result<Output, Stri
         .map_err(|error| format!("无法执行 Mihomo 配置校验：{error}"))
 }
 
+pub fn configure_workspace_service(config_path: &Path) -> Result<(), String> {
+    if config_path != Path::new(crate::workspace::DEFAULT_SOURCE_PATH) {
+        return Err(format!(
+            "本机托管模式只支持 {}",
+            crate::workspace::DEFAULT_SOURCE_PATH
+        ));
+    }
+    if !effective_root() {
+        return Err(root_required_message().into());
+    }
+    validate_systemd_unit(UnitExpectation::Packaged)?;
+    let binary = mihomo_binary_path().ok_or_else(|| "找不到受信任的 Mihomo".to_string())?;
+    let drop_in = Path::new(MANAGED_DROP_IN);
+    let directory = drop_in
+        .parent()
+        .ok_or_else(|| "systemd drop-in 路径没有父目录".to_string())?;
+    let existed = fs::symlink_metadata(directory).is_ok();
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("无法创建 Mihomo systemd drop-in 目录：{error}"))?;
+    #[cfg(unix)]
+    if !existed {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("无法设置 Mihomo systemd drop-in 目录权限：{error}"))?;
+    }
+    let metadata = fs::symlink_metadata(directory)
+        .map_err(|error| format!("无法检查 Mihomo systemd drop-in 目录：{error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!("{} 不是普通目录", directory.display()));
+    }
+    #[cfg(unix)]
+    {
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(format!("{} 的所有者或权限不安全", directory.display()));
+        }
+    }
+    let content = workspace_drop_in_content(&binary);
+    if fs::symlink_metadata(drop_in).is_ok() && !trusted_root_file(drop_in) {
+        return Err(format!("{} 不是安全的 root 普通文件", drop_in.display()));
+    }
+    if fs::read_to_string(drop_in).ok().as_deref() == Some(content.as_str()) {
+        return daemon_reload();
+    }
+    let candidate = directory.join(format!(".10-mihomo-tui-{}.conf", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o644);
+    let mut file = options
+        .open(&candidate)
+        .map_err(|error| format!("无法创建 Mihomo systemd drop-in 候选：{error}"))?;
+    if let Err(error) = file
+        .write_all(content.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        let _ = fs::remove_file(&candidate);
+        return Err(format!("无法写入 Mihomo systemd drop-in：{error}"));
+    }
+    if let Err(error) = fs::rename(&candidate, drop_in) {
+        let _ = fs::remove_file(&candidate);
+        return Err(format!("无法安装 Mihomo systemd drop-in：{error}"));
+    }
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("无法同步 Mihomo systemd drop-in 目录：{error}"))?;
+    daemon_reload()
+}
+
+fn workspace_drop_in_content(binary: &Path) -> String {
+    format!(
+        "[Service]\nExecStart=\nExecStart={} -d /etc/mihomo-tui\n",
+        binary.display()
+    )
+}
+
 fn inspect() -> Inventory {
     Inventory {
         binary: BINARY_PATHS.iter().any(path_present),
         unit: UNIT_PATHS.iter().any(path_present),
-        config: CONFIG_PATHS.iter().any(path_present),
     }
 }
 
@@ -227,7 +260,6 @@ fn validate_existing_install() -> Result<(), String> {
     for (kind, paths) in [
         ("binary", BINARY_PATHS.as_slice()),
         ("service", UNIT_PATHS.as_slice()),
-        ("config", CONFIG_PATHS.as_slice()),
     ] {
         for path in paths.iter().filter(|path| path_present(path)) {
             if !trusted_root_file(Path::new(path)) {
@@ -238,43 +270,6 @@ fn validate_existing_install() -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn system_config_state() -> Result<ConfigState, String> {
-    let path = CONFIG_PATHS
-        .iter()
-        .map(Path::new)
-        .find(|path| path_present(path))
-        .ok_or_else(|| "找不到系统 Mihomo 配置".to_string())?;
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("无法读取系统 Mihomo 配置 {}：{error}", path.display()))?;
-    let state = classify_config(&content)?;
-    if state == ConfigState::VendorDefault && path != Path::new(MIHOMO_CONFIG) {
-        return Ok(ConfigState::Unsupported);
-    }
-    Ok(state)
-}
-
-fn classify_config(content: &str) -> Result<ConfigState, String> {
-    let document: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|error| format!("Mihomo 配置解析失败：{error}"))?;
-    let root = document
-        .as_mapping()
-        .ok_or_else(|| "Mihomo 配置根节点不是 YAML 映射".to_string())?;
-    if root
-        .get(serde_yaml::Value::String("external-controller".into()))
-        .and_then(serde_yaml::Value::as_str)
-        .is_some_and(|controller| !controller.trim().is_empty())
-    {
-        return Ok(ConfigState::Ready);
-    }
-    let vendor: serde_yaml::Value = serde_yaml::from_str(VENDOR_DEFAULT_CONFIG)
-        .map_err(|error| format!("内置 Mihomo 默认配置无效：{error}"))?;
-    Ok(if document == vendor {
-        ConfigState::VendorDefault
-    } else {
-        ConfigState::Unsupported
-    })
 }
 
 fn mihomo_binary_path() -> Option<PathBuf> {
@@ -295,7 +290,7 @@ fn systemctl_path() -> Result<PathBuf, String> {
 fn parse_systemd_unit(output: &str) -> Result<SystemdUnitState, String> {
     let mut load_state = None;
     let mut fragment_path = None;
-    let mut has_drop_ins = None;
+    let mut drop_in_paths = None;
     for line in output.lines() {
         let Some((name, value)) = line.split_once('=') else {
             continue;
@@ -306,7 +301,9 @@ fn parse_systemd_unit(output: &str) -> Result<SystemdUnitState, String> {
                 fragment_path =
                     Some((!value.trim().is_empty()).then(|| PathBuf::from(value.trim())))
             }
-            "DropInPaths" => has_drop_ins = Some(!value.trim().is_empty()),
+            "DropInPaths" => {
+                drop_in_paths = Some(value.split_whitespace().map(PathBuf::from).collect())
+            }
             _ => {}
         }
     }
@@ -316,7 +313,7 @@ fn parse_systemd_unit(output: &str) -> Result<SystemdUnitState, String> {
             .ok_or_else(|| "systemd 未返回 Mihomo 服务的 LoadState".to_string())?,
         fragment_path: fragment_path
             .ok_or_else(|| "systemd 未返回 Mihomo 服务的 FragmentPath".to_string())?,
-        has_drop_ins: has_drop_ins
+        drop_in_paths: drop_in_paths
             .ok_or_else(|| "systemd 未返回 Mihomo 服务的 DropInPaths".to_string())?,
     })
 }
@@ -325,10 +322,13 @@ fn validate_systemd_unit_state(
     state: &SystemdUnitState,
     expectation: UnitExpectation,
 ) -> Result<(), String> {
-    let absent =
-        state.load_state == "not-found" && state.fragment_path.is_none() && !state.has_drop_ins;
+    let absent = state.load_state == "not-found"
+        && state.fragment_path.is_none()
+        && state.drop_in_paths.is_empty();
+    let managed_drop_ins = state.drop_in_paths.is_empty()
+        || state.drop_in_paths.as_slice() == [PathBuf::from(MANAGED_DROP_IN)];
     let packaged = state.load_state == "loaded"
-        && !state.has_drop_ins
+        && managed_drop_ins
         && state.fragment_path.as_deref().is_some_and(|path| {
             UNIT_PATHS
                 .iter()
@@ -337,7 +337,6 @@ fn validate_systemd_unit_state(
     let valid = match expectation {
         UnitExpectation::Absent => absent,
         UnitExpectation::Packaged => packaged,
-        UnitExpectation::PackagedOrAbsent => packaged || absent,
     };
     if valid {
         return Ok(());
@@ -350,7 +349,12 @@ fn validate_systemd_unit_state(
             .as_deref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<none>".into()),
-        state.has_drop_ins
+        state
+            .drop_in_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
     ))
 }
 
@@ -380,6 +384,14 @@ fn validate_systemd_unit(expectation: UnitExpectation) -> Result<(), String> {
             "systemd 加载的 Mihomo 服务文件 {} 不是安全的 root 普通文件",
             path.display()
         ));
+    }
+    for path in &state.drop_in_paths {
+        if !trusted_root_file(path) {
+            return Err(format!(
+                "systemd 加载的 Mihomo drop-in {} 不是安全的 root 普通文件",
+                path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -463,9 +475,8 @@ fn install_for_apply() -> Result<(), String> {
     eprintln!("安装包校验通过，正在安装 Mihomo 服务...");
     install_deb(&artifact.path)?;
     verify_installed_version()?;
-    configure_installed_default()?;
     daemon_reload()?;
-    eprintln!("Mihomo {MIHOMO_VERSION} 已安装，正在应用独立配置。");
+    eprintln!("Mihomo {MIHOMO_VERSION} 已安装，正在加载唯一配置。");
     Ok(())
 }
 
@@ -669,78 +680,10 @@ fn verify_installed_version() -> Result<(), String> {
     Ok(())
 }
 
-fn configure_installed_default() -> Result<(), String> {
-    let config_path = Path::new(MIHOMO_CONFIG);
-    let metadata = fs::symlink_metadata(config_path)
-        .map_err(|error| format!("安装后找不到默认配置：{error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err(format!("{} 不是普通文件，拒绝覆盖", config_path.display()));
-    }
-    #[cfg(unix)]
-    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-        return Err(format!(
-            "{} 的所有者或权限不安全，拒绝覆盖",
-            config_path.display()
-        ));
-    }
-    let vendor = fs::read_to_string(config_path)
-        .map_err(|error| format!("无法读取 Mihomo 默认配置：{error}"))?;
-    let configured = configure_fresh_config(&vendor, &random_hex(32)?)?;
-    let (artifact, mut file) = TempArtifact::create("yaml")?;
-    file.write_all(configured.as_bytes())
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("无法写入临时 Mihomo 配置：{error}"))?;
-    drop(file);
-
-    let validation = validate_config(&artifact.path, Path::new("/etc/mihomo"))?;
-    checked_output("mihomo 配置校验", validation)?;
-    let source = artifact
-        .path
-        .to_str()
-        .ok_or_else(|| "临时配置路径不是 UTF-8".to_string())?;
-    let output = run_privileged(
-        Path::new("/usr/bin/install"),
-        &[
-            "--mode=0600",
-            "--owner=root",
-            "--group=root",
-            source,
-            MIHOMO_CONFIG,
-        ],
-    )?;
-    checked_output("安装 Mihomo 默认配置", output).map(|_| ())
-}
-
 fn daemon_reload() -> Result<(), String> {
     let systemctl = systemctl_path()?;
     let output = run_privileged(&systemctl, &["daemon-reload"])?;
     checked_output("systemctl daemon-reload", output).map(|_| ())
-}
-
-fn configure_fresh_config(content: &str, secret: &str) -> Result<String, String> {
-    let mut document: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|error| error.to_string())?;
-    let root = document
-        .as_mapping_mut()
-        .ok_or_else(|| "Mihomo 默认配置不是 YAML 映射".to_string())?;
-    for key in ["external-controller", "secret"] {
-        if root.contains_key(serde_yaml::Value::String(key.into())) {
-            return Err(format!("Mihomo 配置已包含 {key}，拒绝按全新安装覆盖"));
-        }
-    }
-    root.insert(
-        serde_yaml::Value::String("external-controller".into()),
-        serde_yaml::Value::String("127.0.0.1:9090".into()),
-    );
-    root.insert(
-        serde_yaml::Value::String("secret".into()),
-        serde_yaml::Value::String(secret.into()),
-    );
-    root.insert(
-        serde_yaml::Value::String("allow-lan".into()),
-        serde_yaml::Value::Bool(false),
-    );
-    serde_yaml::to_string(&document).map_err(|error| error.to_string())
 }
 
 fn validate_deb_metadata(metadata: &str, package: Package) -> Result<(), String> {
@@ -812,7 +755,6 @@ mod tests {
         let inventory = Inventory {
             binary: false,
             unit: false,
-            config: false,
         };
 
         assert_eq!(plan(RuntimeMode::External, inventory, true), Action::None);
@@ -823,7 +765,6 @@ mod tests {
         let inventory = Inventory {
             binary: false,
             unit: false,
-            config: false,
         };
 
         assert_eq!(
@@ -837,7 +778,6 @@ mod tests {
         let inventory = Inventory {
             binary: false,
             unit: false,
-            config: false,
         };
 
         assert_eq!(
@@ -851,7 +791,6 @@ mod tests {
         let inventory = Inventory {
             binary: true,
             unit: true,
-            config: true,
         };
 
         assert_eq!(
@@ -866,17 +805,10 @@ mod tests {
             Inventory {
                 binary: true,
                 unit: false,
-                config: false,
             },
             Inventory {
                 binary: false,
                 unit: true,
-                config: false,
-            },
-            Inventory {
-                binary: false,
-                unit: false,
-                config: true,
             },
         ] {
             assert_eq!(
@@ -934,45 +866,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(mismatch.contains("SHA-256"));
-    }
-
-    #[test]
-    fn fresh_config_exposes_only_a_loopback_controller() {
-        let vendor = r#"
-mixed-port: 7890
-dns:
-  enable: true
-rules:
-  - MATCH,DIRECT
-"#;
-
-        let configured = configure_fresh_config(vendor, "generated-secret").unwrap();
-        let document: serde_yaml::Value = serde_yaml::from_str(&configured).unwrap();
-
-        assert_eq!(document["external-controller"], "127.0.0.1:9090");
-        assert_eq!(document["secret"], "generated-secret");
-        assert_eq!(document["allow-lan"], false);
-        assert_eq!(document["dns"]["enable"], true);
-        assert_eq!(document["rules"][0], "MATCH,DIRECT");
-
-        let existing = "external-controller: 0.0.0.0:9090\nsecret: existing\n";
-        assert!(configure_fresh_config(existing, "new-secret").is_err());
-    }
-
-    #[test]
-    fn only_vendor_default_config_is_safe_to_resume() {
-        assert_eq!(
-            classify_config(VENDOR_DEFAULT_CONFIG).unwrap(),
-            ConfigState::VendorDefault
-        );
-        assert_eq!(
-            classify_config("external-controller: 127.0.0.1:9090\nrules: []\n").unwrap(),
-            ConfigState::Ready
-        );
-        assert_eq!(
-            classify_config("mixed-port: 7891\nrules: [MATCH,DIRECT]\n").unwrap(),
-            ConfigState::Unsupported
-        );
     }
 
     #[test]
@@ -1068,8 +961,22 @@ rules:
         .unwrap();
         assert!(validate_systemd_unit_state(&overridden, UnitExpectation::Packaged).is_err());
 
+        let managed = parse_systemd_unit(&format!(
+            "LoadState=loaded\nFragmentPath=/usr/lib/systemd/system/mihomo.service\nDropInPaths={MANAGED_DROP_IN}\n"
+        ))
+        .unwrap();
+        assert!(validate_systemd_unit_state(&managed, UnitExpectation::Packaged).is_ok());
+
         let absent =
             parse_systemd_unit("LoadState=not-found\nFragmentPath=\nDropInPaths=\n").unwrap();
         assert!(validate_systemd_unit_state(&absent, UnitExpectation::Absent).is_ok());
+    }
+
+    #[test]
+    fn managed_drop_in_points_mihomo_at_the_single_config_directory() {
+        assert_eq!(
+            workspace_drop_in_content(Path::new("/usr/bin/mihomo")),
+            "[Service]\nExecStart=\nExecStart=/usr/bin/mihomo -d /etc/mihomo-tui\n"
+        );
     }
 }

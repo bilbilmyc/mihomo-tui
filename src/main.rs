@@ -29,13 +29,13 @@ struct Args {
     /// Mihomo API secret. Prefer MIHOMO_SECRET in shell environments.
     #[arg(long, env = "MIHOMO_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// External Mihomo config imported on first use and used for comparison.
+    /// Legacy Mihomo config imported only when the owned config does not exist.
     #[arg(long, env = "MIHOMO_CONFIG")]
     config: Option<PathBuf>,
-    /// Independent mihomo-tui configuration source.
+    /// Single native configuration owned by mihomo-tui.
     #[arg(long, env = "MIHOMO_TUI_CONFIG")]
     workspace: Option<PathBuf>,
-    /// Do not download Mihomo during explicit apply.
+    /// Do not download Mihomo when reloading the managed core.
     #[arg(long)]
     no_auto_install: bool,
 }
@@ -54,21 +54,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let controller_was_explicit = args.controller.is_some();
     let config_was_explicit = args.config.is_some();
+    let workspace_was_explicit = args.workspace.is_some();
     let source_path = args
         .workspace
         .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_SOURCE_PATH));
-    let runtime_path = args
+    let import_path = args
         .config
-        .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_RUNTIME_PATH));
-    if config_was_explicit && std::fs::symlink_metadata(&runtime_path).is_err() {
+        .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_IMPORT_PATH));
+    if config_was_explicit
+        && std::fs::symlink_metadata(&source_path).is_err()
+        && std::fs::symlink_metadata(&import_path).is_err()
+    {
         return Err(std::io::Error::other(format!(
-            "显式 Mihomo 运行配置不存在：{}",
-            runtime_path.display()
+            "显式 Mihomo 待导入配置不存在：{}",
+            import_path.display()
         ))
         .into());
     }
-    workspace::initialize(&source_path, Some(&runtime_path)).map_err(std::io::Error::other)?;
-    let discovered = discovery::discover(Some(&source_path));
+    workspace::initialize(&source_path, Some(&import_path)).map_err(std::io::Error::other)?;
+    let discovered = discovery::discover(&source_path);
     let controller = args
         .controller
         .or_else(|| discovered.as_ref().map(|info| info.controller.clone()));
@@ -82,12 +86,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(out, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
-    let config_reload = apply_policy(controller_was_explicit, config_was_explicit);
+    let config_reload = apply_policy(
+        controller_was_explicit,
+        config_was_explicit,
+        workspace_was_explicit,
+    );
     let result = App::with_workspace(
         controller,
         secret,
         Some(source_path),
-        Some(runtime_path),
         config_reload,
         !args.no_auto_install,
     )
@@ -102,8 +109,12 @@ fn render_fatal_error(error: impl Display) -> String {
     format!("mihomo-tui: {error}")
 }
 
-fn apply_policy(controller_was_explicit: bool, config_was_explicit: bool) -> ConfigReload {
-    if controller_was_explicit || config_was_explicit {
+fn apply_policy(
+    controller_was_explicit: bool,
+    config_was_explicit: bool,
+    workspace_was_explicit: bool,
+) -> ConfigReload {
+    if controller_was_explicit || config_was_explicit || workspace_was_explicit {
         ConfigReload::None
     } else {
         ConfigReload::LocalSystemd
@@ -116,14 +127,18 @@ mod tests {
 
     #[test]
     fn explicit_controller_or_config_never_manages_the_local_service() {
-        assert_eq!(apply_policy(true, false), ConfigReload::None);
-        assert_eq!(apply_policy(false, true), ConfigReload::None);
-        assert_eq!(apply_policy(true, true), ConfigReload::None);
+        assert_eq!(apply_policy(true, false, false), ConfigReload::None);
+        assert_eq!(apply_policy(false, true, false), ConfigReload::None);
+        assert_eq!(apply_policy(true, true, false), ConfigReload::None);
+        assert_eq!(apply_policy(false, false, true), ConfigReload::None);
     }
 
     #[test]
-    fn default_runtime_target_enables_local_apply() {
-        assert_eq!(apply_policy(false, false), ConfigReload::LocalSystemd);
+    fn default_owned_config_enables_local_reload() {
+        assert_eq!(
+            apply_policy(false, false, false),
+            ConfigReload::LocalSystemd
+        );
     }
 
     #[test]
