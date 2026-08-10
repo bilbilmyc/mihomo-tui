@@ -4,6 +4,11 @@
   "recommended": "v1.19.29",
   "minimum_supported": "v1.19.28",
   "maximum_exclusive": "v1.20.0",
+  "license": {
+    "spdx": "GPL-3.0",
+    "asset": "LICENSE",
+    "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+  },
   "packages": [
     {
       "os": "linux",

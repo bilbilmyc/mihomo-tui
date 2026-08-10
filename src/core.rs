@@ -91,6 +91,13 @@ pub struct CorePackage {
     pub deb_version: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CoreLicense {
+    pub spdx: String,
+    pub asset: String,
+    pub sha256: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ManifestDocument {
     schema: u32,
@@ -98,6 +105,7 @@ struct ManifestDocument {
     recommended: String,
     minimum_supported: String,
     maximum_exclusive: String,
+    license: CoreLicense,
     packages: Vec<CorePackage>,
 }
 
@@ -106,6 +114,7 @@ pub struct CoreRelease {
     recommended: CoreVersion,
     minimum_supported: CoreVersion,
     maximum_exclusive: CoreVersion,
+    license: CoreLicense,
     packages: Vec<CorePackage>,
 }
 
@@ -139,6 +148,7 @@ impl CoreRelease {
         if document.packages.is_empty() {
             return Err("managed-core manifest must contain at least one package".into());
         }
+        validate_license(&document.license)?;
 
         let mut targets = HashSet::new();
         for package in &document.packages {
@@ -155,6 +165,7 @@ impl CoreRelease {
             recommended,
             minimum_supported,
             maximum_exclusive,
+            license: document.license,
             packages: document.packages,
         })
     }
@@ -169,6 +180,10 @@ impl CoreRelease {
 
     pub fn maximum_exclusive(&self) -> CoreVersion {
         self.maximum_exclusive
+    }
+
+    pub fn license(&self) -> &CoreLicense {
+        &self.license
     }
 
     pub fn compatibility(&self, version: CoreVersion) -> Compatibility {
@@ -228,12 +243,7 @@ fn validate_package(package: &CorePackage, recommended: CoreVersion) -> Result<(
             package.os, package.arch
         ));
     }
-    if package.sha256.len() != 64
-        || !package
-            .sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
+    if !valid_sha256(&package.sha256) {
         return Err(format!(
             "managed-core package {}/{} has an invalid SHA-256",
             package.os, package.arch
@@ -248,6 +258,20 @@ fn validate_package(package: &CorePackage, recommended: CoreVersion) -> Result<(
     Ok(())
 }
 
+fn validate_license(license: &CoreLicense) -> Result<(), String> {
+    if license.spdx != "GPL-3.0" || license.asset != "LICENSE" || !valid_sha256(&license.sha256) {
+        return Err("managed-core license metadata is invalid".into());
+    }
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +282,11 @@ mod tests {
         "recommended": "v1.19.29",
         "minimum_supported": "v1.19.28",
         "maximum_exclusive": "v1.20.0",
+        "license": {
+            "spdx": "GPL-3.0",
+            "asset": "LICENSE",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        },
         "packages": [
             {
                 "os": "linux",
@@ -285,12 +314,18 @@ mod tests {
             release.package_for("linux", "aarch64").unwrap().deb_arch,
             "arm64"
         );
+        assert_eq!(release.license().spdx, "GPL-3.0");
+        assert_eq!(
+            release.license().sha256,
+            "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        );
     }
 
     #[test]
     fn manifest_validation_rejects_untrusted_or_ambiguous_metadata() {
         for invalid in [
             VALID_MANIFEST.replace("MetaCubeX/mihomo", "attacker/mihomo"),
+            VALID_MANIFEST.replace("\"GPL-3.0\"", "\"MIT\""),
             VALID_MANIFEST.replace(
                 "6919c50b403a60c3956d07e776c06e1b11bd466e6b05341c1605ce450f79a591",
                 "not-a-sha256",

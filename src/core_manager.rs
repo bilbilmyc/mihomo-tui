@@ -91,6 +91,7 @@ struct CoreStatus {
     recommended: CoreVersion,
     minimum_supported: CoreVersion,
     maximum_exclusive: CoreVersion,
+    license_spdx: String,
 }
 
 fn inspect_at(paths: &CorePaths, system_binaries: &[PathBuf]) -> Result<CoreStatus, String> {
@@ -123,6 +124,7 @@ fn inspect_at(paths: &CorePaths, system_binaries: &[PathBuf]) -> Result<CoreStat
         recommended: release.recommended(),
         minimum_supported: release.minimum_supported(),
         maximum_exclusive: release.maximum_exclusive(),
+        license_spdx: release.license().spdx.clone(),
     })
 }
 
@@ -512,8 +514,12 @@ fn render_status(status: &CoreStatus) -> String {
             .join(", ")
     };
     format!(
-        "managed root: {MANAGED_ROOT}\nactive: {active}\ninstalled: {installed}\nsystem: {}\nrecommended: {}\ncompatible: >={}, <{}",
-        system, status.recommended, status.minimum_supported, status.maximum_exclusive
+        "managed root: {MANAGED_ROOT}\nactive: {active}\ninstalled: {installed}\nsystem: {}\nrecommended: {}\ncompatible: >={}, <{}\nlicense: {}",
+        system,
+        status.recommended,
+        status.minimum_supported,
+        status.maximum_exclusive,
+        status.license_spdx
     )
 }
 
@@ -619,6 +625,7 @@ mod tests {
             recommended: release.recommended(),
             minimum_supported: release.minimum_supported(),
             maximum_exclusive: release.maximum_exclusive(),
+            license_spdx: release.license().spdx.clone(),
         };
 
         let output = render_status(&status);
@@ -628,6 +635,7 @@ mod tests {
         assert!(output.contains("recommended: v1.19.29"));
         assert!(output.contains("compatible: >=v1.19.28, <v1.20.0"));
         assert!(output.contains("system: v1.19.28 (/usr/bin/mihomo)"));
+        assert!(output.contains("license: GPL-3.0"));
     }
 
     #[cfg(unix)]

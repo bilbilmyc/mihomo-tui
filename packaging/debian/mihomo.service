@@ -1,0 +1,17 @@
+[Unit]
+Description=Mihomo managed by mihomo-tui
+Documentation=https://github.com/MetaCubeX/mihomo
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

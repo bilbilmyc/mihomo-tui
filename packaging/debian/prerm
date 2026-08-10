@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now mihomo.service || true
+fi
+
+exit 0
