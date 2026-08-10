@@ -29,7 +29,7 @@ struct Args {
     /// Mihomo API secret. Prefer MIHOMO_SECRET in shell environments.
     #[arg(long, env = "MIHOMO_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// Mihomo runtime config imported on first use and written by explicit apply.
+    /// External Mihomo config imported on first use and used for comparison.
     #[arg(long, env = "MIHOMO_CONFIG")]
     config: Option<PathBuf>,
     /// Independent mihomo-tui configuration source.
