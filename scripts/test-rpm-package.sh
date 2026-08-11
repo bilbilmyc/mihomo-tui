@@ -9,7 +9,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 manifest="$repo_root/managed-core.json"
 package=$1
-for tool in basename cpio dirname grep jq readlink rpm rpm2cpio sed sha256sum stat systemd-analyze; do
+for tool in basename cpio dirname grep jq realpath rpm rpm2cpio sed sha256sum stat systemd-analyze; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required tool is missing: $tool" >&2
     exit 1
@@ -19,6 +19,7 @@ done
   echo "package is not a regular file: $package" >&2
   exit 1
 }
+package=$(realpath "$package")
 
 core_tag=$(jq -er '.recommended' "$manifest")
 license_sha256=$(jq -er '.license.sha256' "$manifest")
