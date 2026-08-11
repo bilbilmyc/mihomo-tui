@@ -50,6 +50,7 @@ install -m 755 "$RELEASE_BINARY" "$topdir/SOURCES/mihomo-tui"
 install -m 755 "$RELEASE_CORE_BINARY" "$topdir/SOURCES/mihomo"
 install -m 644 "$repo_root/packaging/debian/mihomo.service" "$topdir/SOURCES/mihomo.service"
 install -m 644 "$repo_root/docs/server-guide.md" "$topdir/SOURCES/server-guide.md"
+install -m 644 "$repo_root/LICENSE" "$topdir/SOURCES/mihomo-tui-LICENSE"
 install -m 644 "$RELEASE_LICENSE_FILE" "$topdir/SOURCES/Mihomo-LICENSE"
 release_write_notice "$topdir/SOURCES/Mihomo-NOTICE"
 sed \

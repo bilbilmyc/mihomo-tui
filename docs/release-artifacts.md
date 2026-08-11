@@ -60,10 +60,10 @@ docker run --rm \
 
 CI 会为版本标签生成经过验证的 Release 草稿，但公开发布还必须满足：
 
-- 声明 `mihomo-tui` Rust 项目的许可证和版权持有人；
+- 发布物携带 `mihomo-tui` 的 MIT 许可证；
 - 用真实的 Deb/RPM 维护者联系方式替换当前占位内容；
 - 审查固定的 Mihomo 版本、哈希、许可证文本与源码声明；
 - x86_64 和 aarch64 软件包任务均成功；
 - 维护者人工审查 Release 草稿。
 
-随包提供的 Mihomo 许可证和源码声明不会替 `mihomo-tui` 自身选择许可证。
+`mihomo-tui` 采用 MIT License；随包 Mihomo 继续适用 GPL-3.0，并携带独立的许可证和源码声明。

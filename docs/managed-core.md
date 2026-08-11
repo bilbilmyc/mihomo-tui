@@ -131,7 +131,7 @@ pub fn compatibility(version: CoreVersion) -> Compatibility {
 
 ### 随包分发
 
-- 使用 `dpkg-deb --build --root-owner-group` 构建 Debian 包，使用标准 `rpmbuild` 构建 RPM。两种软件包都包含 `mihomo-tui`、位于 `bundled/<version>` 的受测官方内核、`mihomo.service` unit、许可证/源码声明和维护者脚本。
+- 使用 `dpkg-deb --build --root-owner-group` 构建 Debian 包，使用标准 `rpmbuild` 构建 RPM。两种软件包都包含 `mihomo-tui`、位于 `bundled/<version>` 的受测官方内核、`mihomo.service` unit、项目 MIT 许可证、Mihomo GPL-3.0 许可证/源码声明和维护者脚本。
 - 安装时，`postinst` 校验 root 所有权、权限和同版本不可变字节后，在 `cores/<version>/mihomo` 创建硬链接。只有没有当前链接时才创建 `current`。该受管硬链接有意不归包管理器所有，因此替换软件包载荷不会删除当前或回滚内核。
 - 安装新版软件包只注册其内核并保留 `current`。激活仍必须显式执行 `sudo mihomo-tui core upgrade` 事务。
 - 随包版本与单独安装的 `mihomo` 软件包冲突，因为二者都会拥有同一个服务；用户必须明确选择随包托管模式或外部管理模式。
@@ -173,6 +173,6 @@ pub fn compatibility(version: CoreVersion) -> Compatibility {
 
 ## 发布门禁
 
-随包 Mihomo 的许可证文本和对应源码 URL 必须存在，一次性主机软件包测试与回滚测试必须通过，并且人工批准 Release Pull Request，之后才能发布软件包。在公开分发前，仓库还必须声明 `mihomo-tui` 项目自身的许可证和真实的软件包维护者身份；当前自动检查覆盖随包 Mihomo 的 GPL-3.0 材料，但不能替本项目选择许可证或版权持有人。
+`mihomo-tui` 采用 MIT License，软件包必须携带该许可证。随包 Mihomo 的 GPL-3.0 许可证文本和对应源码 URL 也必须存在。一次性主机软件包测试与回滚测试必须通过，软件包必须使用真实的维护者身份，并且人工批准 Release Pull Request，之后才能公开发布。
 
 缺少任一项目的许可证材料、源码信息、回滚证据或架构覆盖都会阻止发布。

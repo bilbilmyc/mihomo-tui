@@ -2,6 +2,10 @@
 name = "mihomo-tui"
 version = "0.1.0"
 edition = "2024"
+description = "面向 Linux 服务器、适合通过 SSH 使用的 Mihomo 终端控制中心"
+license = "MIT"
+repository = "https://github.com/bilbilmyc/mihomo-tui"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }

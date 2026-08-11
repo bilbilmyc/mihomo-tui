@@ -2,7 +2,7 @@ Name:           mihomo-tui
 Version:        @APP_VERSION@
 Release:        1.mihomo@CORE_VERSION@
 Summary:        SSH-friendly terminal control center with a pinned Mihomo core
-License:        LicenseRef-Undeclared AND GPL-3.0-only
+License:        MIT AND GPL-3.0-only
 BuildArch:      @RPM_ARCH@
 Source0:        mihomo-tui
 Source1:        mihomo
@@ -10,6 +10,7 @@ Source2:        mihomo.service
 Source3:        server-guide.md
 Source4:        Mihomo-LICENSE
 Source5:        Mihomo-NOTICE
+Source6:        mihomo-tui-LICENSE
 Requires:       ca-certificates
 Requires:       systemd
 Recommends:     iproute
@@ -36,6 +37,7 @@ install -m 644 %{SOURCE2} %{buildroot}%{_prefix}/lib/systemd/system/mihomo.servi
 install -m 644 %{SOURCE3} %{buildroot}%{_docdir}/mihomo-tui/server-guide.md
 install -m 644 %{SOURCE4} %{buildroot}%{_docdir}/mihomo-tui/Mihomo-LICENSE
 install -m 644 %{SOURCE5} %{buildroot}%{_docdir}/mihomo-tui/Mihomo-NOTICE
+install -m 644 %{SOURCE6} %{buildroot}%{_docdir}/mihomo-tui/mihomo-tui-LICENSE
 
 %pre
 if [ "$1" -eq 1 ]; then
@@ -150,3 +152,4 @@ fi
 %doc %{_docdir}/mihomo-tui/server-guide.md
 %doc %{_docdir}/mihomo-tui/Mihomo-NOTICE
 %license %{_docdir}/mihomo-tui/Mihomo-LICENSE
+%license %{_docdir}/mihomo-tui/mihomo-tui-LICENSE

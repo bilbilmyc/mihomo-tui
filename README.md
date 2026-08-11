@@ -9,14 +9,14 @@
 [![持续集成](https://github.com/bilbilmyc/mihomo-tui/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/bilbilmyc/mihomo-tui/actions/workflows/ci.yml)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![运行平台](https://img.shields.io/badge/Linux-x86__64%20%7C%20aarch64-2f6f4e?logo=linux&logoColor=white)](#系统要求)
-[![项目许可证](https://img.shields.io/badge/许可证-尚未声明-d97706)](#许可证)
+[![MIT 许可证](https://img.shields.io/badge/许可证-MIT-2f6f4e)](LICENSE)
 
 [快速开始](#快速开始) · [安装](#安装) · [使用说明](#使用说明) · [项目文档](#项目文档) · [参与贡献](#参与贡献)
 
 </div>
 
-> [!IMPORTANT]
-> 本仓库目前尚未声明 `mihomo-tui` Rust 源码的项目级许可证。公开可见不等于获得复制、修改或分发授权；打包发布仍需维护者先明确许可证与版权信息。随包提供的 Mihomo GPL-3.0 材料只适用于 Mihomo 本身。
+> [!NOTE]
+> `mihomo-tui` 采用宽松的 [MIT License](LICENSE)，允许个人或商业使用、修改和再分发。随包提供的 Mihomo 是独立项目，继续适用其自身的 GPL-3.0 许可证。
 
 ## 项目简介
 
@@ -280,6 +280,6 @@ deb_arch=$(dpkg --print-architecture)
 
 ## 许可证
 
-`mihomo-tui` Rust 源码目前**尚未声明项目级许可证**。在维护者补充明确的许可证和版权持有人之前，本仓库默认保留全部权利，公开可见不构成开源授权，也不应发布项目二进制包。
+`mihomo-tui` 采用 [MIT License](LICENSE)。你可以免费使用、复制、修改、合并、发布、分发、再许可或销售本项目，包括个人与商业用途；再分发时需保留原版权和许可证声明。
 
-随 Deb/RPM 分发的 Mihomo 是独立项目；其固定许可证文本、源码地址和哈希由 `managed-core.json` 及打包流程单独管理，不会替 `mihomo-tui` 选择许可证。
+随 Deb/RPM 分发的 Mihomo 是独立项目，适用 GPL-3.0。其固定许可证文本、源码地址和哈希由 `managed-core.json` 及打包流程单独管理；发布包会同时携带 `mihomo-tui` 与 Mihomo 各自的许可证文件。

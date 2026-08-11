@@ -178,6 +178,24 @@ release_write_notice() {
   chmod 644 "$destination"
 }
 
+release_write_copyright() {
+  local destination=$1
+  {
+    echo "Project: mihomo-tui"
+    echo "Source: https://github.com/bilbilmyc/mihomo-tui"
+    echo "Copyright: 2026 bilbilmyc and contributors"
+    echo "License: MIT"
+    echo "License file: /usr/share/doc/mihomo-tui/mihomo-tui-LICENSE"
+    echo
+    echo "Bundled component: Mihomo $RELEASE_CORE_TAG"
+    echo "Source: https://github.com/MetaCubeX/mihomo/tree/$RELEASE_CORE_TAG"
+    echo "License: $RELEASE_LICENSE_SPDX"
+    echo "License file: /usr/share/doc/mihomo-tui/Mihomo-LICENSE"
+    echo "Core package SHA-256: $RELEASE_CORE_SHA256"
+  } >"$destination"
+  chmod 644 "$destination"
+}
+
 release_write_checksum() {
   local artifact=$1
   (

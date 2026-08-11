@@ -71,7 +71,15 @@ grep -F '配置恢复' "$server_guide" >/dev/null
 actual_license_sha256=$(sha256sum "$root/usr/share/doc/mihomo-tui/Mihomo-LICENSE")
 actual_license_sha256=${actual_license_sha256%% *}
 [[ $actual_license_sha256 == "$license_sha256" ]]
-for document in Mihomo-LICENSE Mihomo-NOTICE copyright server-guide.md; do
+project_license="$root/usr/share/doc/mihomo-tui/mihomo-tui-LICENSE"
+project_license_sha256=$(sha256sum "$project_license")
+project_license_sha256=${project_license_sha256%% *}
+expected_project_license_sha256=$(sha256sum "$repo_root/LICENSE")
+expected_project_license_sha256=${expected_project_license_sha256%% *}
+[[ $project_license_sha256 == "$expected_project_license_sha256" ]]
+grep -F 'License: MIT' "$root/usr/share/doc/mihomo-tui/copyright" >/dev/null
+grep -F 'License: GPL-3.0' "$root/usr/share/doc/mihomo-tui/copyright" >/dev/null
+for document in mihomo-tui-LICENSE Mihomo-LICENSE Mihomo-NOTICE copyright server-guide.md; do
   [[ $(stat -c '%a' "$root/usr/share/doc/mihomo-tui/$document") == 644 ]]
 done
 

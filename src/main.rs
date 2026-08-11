@@ -494,4 +494,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn release_packages_declare_and_include_the_project_mit_license() {
+        let repository = env!("CARGO_MANIFEST_DIR");
+        let license = std::fs::read_to_string(format!("{repository}/LICENSE"))
+            .expect("the repository must include a project LICENSE");
+        assert!(license.starts_with("MIT License\n"));
+        assert!(license.contains("Copyright (c) 2026 bilbilmyc and contributors"));
+
+        let cargo_manifest = include_str!("../Cargo.toml");
+        assert!(cargo_manifest.contains("license = \"MIT\""));
+
+        let deb_builder = include_str!("../scripts/build-deb.sh");
+        assert!(deb_builder.contains("mihomo-tui-LICENSE"));
+        let deb_test = include_str!("../scripts/test-deb-package.sh");
+        assert!(deb_test.contains("mihomo-tui-LICENSE"));
+
+        let rpm_builder = include_str!("../scripts/build-rpm.sh");
+        assert!(rpm_builder.contains("mihomo-tui-LICENSE"));
+        let rpm_spec = include_str!("../packaging/rpm/mihomo-tui.spec.in");
+        assert!(rpm_spec.contains("License:        MIT AND GPL-3.0-only"));
+        assert!(rpm_spec.contains("mihomo-tui-LICENSE"));
+        let rpm_test = include_str!("../scripts/test-rpm-package.sh");
+        assert!(rpm_test.contains("mihomo-tui-LICENSE"));
+    }
 }

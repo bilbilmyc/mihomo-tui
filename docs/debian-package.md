@@ -27,7 +27,7 @@
 - 使用 `dpkg-shlibdeps` 从实际 Rust ELF 推导 `libc6` 和 `libgcc-s1` 依赖；
 - 通过 `dpkg-deb --build --root-owner-group` 构建归档，并写出权限为 `0644` 的校验文件。
 
-`scripts/test-deb-package.sh` 不安装软件包，而是解包并检查元数据、载荷路径、权限、unit 语法、原生可执行文件版本、许可证哈希、源码声明和校验和。
+`scripts/test-deb-package.sh` 不安装软件包，而是解包并检查元数据、载荷路径、权限、unit 语法、原生可执行文件版本、项目 MIT 许可证、Mihomo 许可证哈希、源码声明和校验和。
 
 ## 安装布局
 
@@ -37,6 +37,7 @@
 /usr/lib/mihomo-tui/cores/<version>/mihomo     受管的不可变硬链接
 /usr/lib/mihomo-tui/current                    当前版本的相对符号链接
 /usr/lib/systemd/system/mihomo.service
+/usr/share/doc/mihomo-tui/mihomo-tui-LICENSE
 /usr/share/doc/mihomo-tui/Mihomo-LICENSE
 /usr/share/doc/mihomo-tui/Mihomo-NOTICE
 /usr/share/doc/mihomo-tui/server-guide.md
@@ -94,9 +95,8 @@ sudo apt remove mihomo-tui
 - 审查清单差异和上游 Release Notes；
 - 确认两个架构任务和回滚测试都已通过；
 - 校验 Deb、RPM、原生 ELF 与 `.sha256` 的文件名和哈希；
-- 保留 `Mihomo-LICENSE`、`Mihomo-NOTICE` 和对应源码 URL；
-- 声明 `mihomo-tui` 项目自身的许可证和版权持有人；
+- 保留 `mihomo-tui-LICENSE`、`Mihomo-LICENSE`、`Mihomo-NOTICE` 和对应源码 URL；
 - 用真实联系方式替换软件包维护者占位信息；
 - 要求人工批准配套 Release。
 
-Mihomo 载荷记录为 GPL-3.0，并固定了许可证哈希。该元数据不会为 Rust `mihomo-tui` 源码授予或选择许可证。在项目维护者完成这项独立法律决策之前，仍禁止公开发布软件包。
+`mihomo-tui` 采用 MIT License；Mihomo 载荷单独记录为 GPL-3.0，并固定许可证哈希。Deb 会同时携带两份许可证及 Mihomo 源码声明。

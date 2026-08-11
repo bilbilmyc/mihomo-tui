@@ -25,6 +25,7 @@ core_tag=$(jq -er '.recommended' "$manifest")
 license_sha256=$(jq -er '.license.sha256' "$manifest")
 [[ $(rpm -qp --queryformat '%{NAME}' "$package") == mihomo-tui ]]
 [[ $(rpm -qp --queryformat '%{CONFLICTNAME}' "$package") == mihomo ]]
+[[ $(rpm -qp --queryformat '%{LICENSE}' "$package") == 'MIT AND GPL-3.0-only' ]]
 architecture=$(rpm -qp --queryformat '%{ARCH}' "$package")
 [[ $architecture == x86_64 || $architecture == aarch64 ]]
 requires=$(rpm -qp --requires "$package")
@@ -54,6 +55,12 @@ grep -F "Source: https://github.com/MetaCubeX/mihomo/tree/$core_tag" \
 actual_license_sha256=$(sha256sum "$root/usr/share/doc/mihomo-tui/Mihomo-LICENSE")
 actual_license_sha256=${actual_license_sha256%% *}
 [[ $actual_license_sha256 == "$license_sha256" ]]
+project_license="$root/usr/share/doc/mihomo-tui/mihomo-tui-LICENSE"
+project_license_sha256=$(sha256sum "$project_license")
+project_license_sha256=${project_license_sha256%% *}
+expected_project_license_sha256=$(sha256sum "$repo_root/LICENSE")
+expected_project_license_sha256=${expected_project_license_sha256%% *}
+[[ $project_license_sha256 == "$expected_project_license_sha256" ]]
 [[ -f $root/usr/share/doc/mihomo-tui/server-guide.md ]]
 
 scripts=$(rpm -qp --scripts "$package")
