@@ -25,6 +25,8 @@ required_ci_contract=(
   'name: release-packages'
   "gh release create \"\$GITHUB_REF_NAME\""
   "gh release upload \"\$GITHUB_REF_NAME\" dist/* --clobber"
+  "gh release view \"\$GITHUB_REF_NAME\" --repo \"\$GITHUB_REPOSITORY\" --json isDraft --jq .isDraft"
+  "gh release download \"\$GITHUB_REF_NAME\" --repo \"\$GITHUB_REPOSITORY\" --dir release-dist"
   'contents: write'
 )
 

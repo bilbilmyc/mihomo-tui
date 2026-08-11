@@ -147,9 +147,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
+          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true"
           mkdir release-dist
-          gh release download "$GITHUB_REF_NAME" --dir release-dist
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir release-dist
           test "$(find release-dist -maxdepth 1 -type f | wc -l)" -eq 12
           cd release-dist
           sha256sum --check -- *.sha256
