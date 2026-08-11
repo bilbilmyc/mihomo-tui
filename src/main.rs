@@ -310,4 +310,53 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn github_ci_keeps_the_complete_linux_release_contract() {
+        let workflow = include_str!("../.github/workflows/ci.yml");
+        let document: serde_yaml::Value = serde_yaml::from_str(workflow).unwrap();
+        let jobs = document
+            .get("jobs")
+            .and_then(|jobs| jobs.as_mapping())
+            .unwrap();
+
+        for job in ["quality", "security-audit", "packages", "draft-release"] {
+            assert!(
+                jobs.contains_key(serde_yaml::Value::from(job)),
+                "CI is missing the {job} job"
+            );
+        }
+        for required in [
+            "ubuntu-24.04-arm",
+            "aarch64",
+            "arm64",
+            "refs/tags/v",
+            "--draft",
+            "refusing to replace assets on a published release",
+            "merge-multiple: true",
+        ] {
+            assert!(workflow.contains(required), "CI is missing {required}");
+        }
+
+        let package_action = include_str!("../.github/actions/build-linux-packages/action.yml");
+        let _: serde_yaml::Value = serde_yaml::from_str(package_action).unwrap();
+        for builder in ["build-native.sh", "build-deb.sh", "build-rpm.sh"] {
+            assert!(
+                package_action.contains(builder),
+                "package action is missing {builder}"
+            );
+        }
+        for verifier in [
+            "test-native-binary.sh",
+            "test-deb-package.sh",
+            "test-rpm-package.sh",
+            "test-install-deb.sh",
+            "test-install-rpm.sh",
+        ] {
+            assert!(
+                package_action.contains(verifier),
+                "package action is missing {verifier}"
+            );
+        }
+    }
 }

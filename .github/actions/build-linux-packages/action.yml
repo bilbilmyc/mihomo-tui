@@ -1,0 +1,76 @@
+name: Build Linux release artifacts
+description: Build and verify native, Deb, and RPM artifacts on a native Linux runner
+
+inputs:
+  rust-architecture:
+    description: Rust and uname architecture
+    required: true
+  debian-architecture:
+    description: Debian architecture
+    required: true
+  upload-artifact:
+    description: Upload the dist directory after verification
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install packaging tools
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cpio dpkg-dev file jq rpm systemd
+
+    - name: Verify native architecture
+      shell: bash
+      run: |
+        test "$(uname -m)" = "${{ inputs.rust-architecture }}"
+        test "$(dpkg --print-architecture)" = "${{ inputs.debian-architecture }}"
+        rustc -vV | grep -F "host: ${{ inputs.rust-architecture }}-unknown-linux-gnu"
+
+    - name: Build release binary
+      shell: bash
+      run: cargo build --release --locked
+
+    - name: Build all release formats
+      shell: bash
+      run: |
+        ./scripts/build-native.sh \
+          --architecture "${{ inputs.rust-architecture }}" \
+          --binary target/release/mihomo-tui
+        ./scripts/build-deb.sh \
+          --architecture "${{ inputs.debian-architecture }}" \
+          --binary target/release/mihomo-tui
+        ./scripts/build-rpm.sh \
+          --architecture "${{ inputs.rust-architecture }}" \
+          --binary target/release/mihomo-tui
+
+    - name: Verify release artifacts
+      shell: bash
+      run: |
+        ./scripts/test-native-binary.sh dist/mihomo-tui-*-linux-${{ inputs.rust-architecture }}
+        ./scripts/test-deb-package.sh dist/*_${{ inputs.debian-architecture }}.deb
+        ./scripts/test-rpm-package.sh dist/*.${{ inputs.rust-architecture }}.rpm
+
+    - name: Install Deb on disposable runner
+      shell: bash
+      run: sudo ./scripts/test-install-deb.sh dist/*_${{ inputs.debian-architecture }}.deb
+
+    - name: Install RPM in disposable Fedora container
+      shell: bash
+      run: |
+        docker run --rm \
+          --volume "$GITHUB_WORKSPACE:/work:ro" \
+          --workdir /work \
+          fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814 \
+          bash -lc 'dnf install -y jq && ./scripts/test-install-rpm.sh dist/*.rpm'
+
+    - name: Upload release artifacts
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: mihomo-tui-linux-${{ inputs.rust-architecture }}
+        path: dist/*
+        if-no-files-found: error
+        retention-days: 14

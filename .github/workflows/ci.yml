@@ -3,7 +3,11 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [master]
+    branches:
+      - "**"
+      - "!automation/**"
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -12,20 +16,27 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: rustfmt, clippy
+      - name: Install shell linter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
       - name: Check formatting
         run: cargo fmt --check
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test managed-core sync policy
-        run: ./scripts/test-sync-managed-core.sh
-      - name: Test Debian bundle policy
-        run: ./scripts/test-build-deb-policy.sh
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          shellcheck -e SC1090 scripts/*.sh scripts/lib/*.sh
+      - name: Test release policies
+        run: |
+          ./scripts/test-sync-managed-core.sh
+          ./scripts/test-build-deb-policy.sh
+          ./scripts/test-build-release-policy.sh
 
   security-audit:
     runs-on: ubuntu-latest
@@ -33,38 +44,69 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ github.token }}
 
-  release-package:
+  packages:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
-            architecture: x86_64
-            debian: amd64
+            rust-architecture: x86_64
+            debian-architecture: amd64
           - runner: ubuntu-24.04-arm
-            architecture: aarch64
-            debian: arm64
+            rust-architecture: aarch64
+            debian-architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify native architecture
-        run: 'rustc -vV | grep "host: ${{ matrix.architecture }}-unknown-linux-gnu"'
-      - name: Build release binary
-        run: cargo build --release --locked
-      - name: Build Debian bundle
-        run: ./scripts/build-deb.sh --architecture "${{ matrix.debian }}"
-      - name: Verify Debian bundle
-        run: ./scripts/test-deb-package.sh dist/*.deb
-      - name: Install bundle on disposable runner
-        run: sudo ./scripts/test-install-deb.sh dist/*.deb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: ./.github/actions/build-linux-packages
         with:
-          name: mihomo-tui-${{ matrix.architecture }}
-          path: dist/*
-          if-no-files-found: error
+          rust-architecture: ${{ matrix.rust-architecture }}
+          debian-architecture: ${{ matrix.debian-architecture }}
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, security-audit, packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: mihomo-tui-linux-*
+          path: release-dist
+          merge-multiple: true
+      - name: Validate tag and checksums
+        shell: bash
+        run: |
+          app_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$GITHUB_REF_NAME" = "v$app_version"
+          test "$(find release-dist -maxdepth 1 -type f | wc -l)" -eq 12
+          cd release-dist
+          sha256sum --check -- *.sha256
+      - name: Create or update draft GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find release-dist -maxdepth 1 -type f | sort)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true" || {
+              echo "refusing to replace assets on a published release" >&2
+              exit 1
+            }
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "${files[@]}" \
+              --draft \
+              --generate-notes \
+              --title "mihomo-tui $GITHUB_REF_NAME" \
+              --verify-tag
+          fi
