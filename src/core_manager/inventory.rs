@@ -7,7 +7,12 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
+    thread,
+    time::Duration,
 };
+
+const VERSION_BUSY_RETRIES: usize = 4;
+const VERSION_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CoreStatus {
@@ -200,12 +205,22 @@ pub(crate) fn inspect_active_version(paths: &CorePaths) -> Result<Option<CoreVer
 }
 
 pub(crate) fn binary_version(binary: &Path) -> Result<CoreVersion, String> {
-    let output = clean_command(binary).arg("-v").output().map_err(|error| {
-        format!(
-            "cannot inspect Mihomo version at {}: {error}",
-            binary.display()
-        )
-    })?;
+    let mut busy_retries = VERSION_BUSY_RETRIES;
+    let output = loop {
+        match clean_command(binary).arg("-v").output() {
+            Ok(output) => break output,
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy && busy_retries > 0 => {
+                busy_retries -= 1;
+                thread::sleep(VERSION_BUSY_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect Mihomo version at {}: {error}",
+                    binary.display()
+                ));
+            }
+        }
+    };
     let output = checked_output(&format!("{} -v", binary.display()), output)?;
     let output = String::from_utf8(output.stdout)
         .map_err(|_| format!("Mihomo version at {} is not UTF-8", binary.display()))?;

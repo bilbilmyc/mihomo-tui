@@ -1,7 +1,8 @@
 use super::{
     CorePaths,
     inventory::{
-        CoreStatus, inspect_active_version, inspect_at, parse_active_link_target, render_status,
+        CoreStatus, binary_version, inspect_active_version, inspect_at, parse_active_link_target,
+        render_status,
     },
     storage::{install_version, switch_current},
 };
@@ -191,6 +192,25 @@ fn staging_a_version_never_overwrites_an_existing_core() {
 
     assert!(error.contains("different bytes"));
     assert_eq!(std::fs::read(paths.binary(version)).unwrap(), installed);
+}
+
+#[cfg(unix)]
+#[test]
+fn version_inspection_retries_a_temporarily_busy_executable() {
+    use std::{fs::OpenOptions, thread, time::Duration};
+
+    let tree = TestTree::create();
+    let binary = tree.write_core("source/mihomo", "v1.19.29");
+    let writer = OpenOptions::new().write(true).open(&binary).unwrap();
+    let closer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(15));
+        drop(writer);
+    });
+
+    let version = binary_version(&binary).unwrap();
+    closer.join().unwrap();
+
+    assert_eq!(version, CoreVersion::parse("v1.19.29").unwrap());
 }
 
 #[cfg(unix)]
