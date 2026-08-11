@@ -36,14 +36,25 @@ impl TestTree {
     }
 
     fn write_core(&self, relative: &str, version: &str) -> PathBuf {
+        use std::io::Write;
+
         let path = self.0.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\nprintf 'Mihomo Meta {version} linux amd64\\n'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let staging = path.with_extension("writing");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+                .unwrap();
+            file.write_all(
+                format!("#!/bin/sh\nprintf 'Mihomo Meta {version} linux amd64\\n'\n").as_bytes(),
+            )
+            .unwrap();
+            file.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(staging, &path).unwrap();
         path
     }
 }
