@@ -23,7 +23,7 @@ jobs:
       - name: Install shell linter
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y ripgrep shellcheck
       - name: Check formatting
         run: cargo fmt --check
       - name: Test
