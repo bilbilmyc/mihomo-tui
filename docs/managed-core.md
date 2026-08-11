@@ -1,29 +1,24 @@
-# Managed Mihomo Core
+# Mihomo 托管内核
 
-## Objective
+## 目标
 
-`mihomo-tui` ships and manages a tested official Mihomo core while keeping the core in a separate
-process. Users get one product and one configuration workflow without turning this repository into
-a Mihomo source fork or linking the Go core into the Rust process.
+`mihomo-tui` 随包提供并管理经过测试的官方 Mihomo 内核，同时让内核继续作为独立进程运行。用户获得一套产品和一套配置流程，但本仓库不会变成 Mihomo 源码分支，也不会把 Go 内核链接进 Rust 进程。
 
-The managed-core contract has two consumers:
+托管内核约定有两类使用方：
 
-- local managed mode installs, validates, configures, and reloads the tested core;
-- external mode keeps using a user-managed controller and never changes the local runtime.
+- 本机托管模式负责安装、校验、配置和重载受测内核；
+- 外部模式继续使用由用户管理的 Controller，绝不改变本机运行时。
 
-Release metadata, compatibility policy, license identity, package construction, explicit activation,
-health rollback, and upstream synchronization all consume the same embedded manifest. Normal TUI
-startup never checks upstream and never activates a newly available core.
+发布元数据、兼容策略、许可证身份、软件包构建、显式激活、健康回滚和上游同步都使用同一份内嵌清单。TUI 普通启动绝不检查上游，也不会激活新发现的内核。
 
-## Tech Stack
+## 技术栈
 
-- Rust 2024 binary with Clap, Ratatui, Reqwest, Serde, and SHA-256 verification.
-- Official Mihomo release binaries remain separate operating-system processes.
-- An embedded JSON manifest is the single source of truth for the recommended version, tested
-  compatibility range, target packages, package metadata, and hashes.
-- Local lifecycle management remains limited to supported Debian/Ubuntu systemd hosts.
+- 采用 Rust 2024，使用 Clap、Ratatui、Reqwest、Serde 和 SHA-256 校验。
+- 官方 Mihomo 发布二进制始终作为独立的操作系统进程运行。
+- 内嵌 JSON 清单是推荐版本、受测兼容范围、目标软件包、包元数据和哈希的唯一事实来源。
+- 本机生命周期管理目前仅支持 Debian/Ubuntu systemd 主机。
 
-## Commands
+## 常用命令
 
 ```bash
 cargo test --all-targets
@@ -35,28 +30,27 @@ sudo ./target/release/mihomo-tui
 sudo ./target/release/mihomo-tui core upgrade
 ```
 
-## Project Structure
+## 项目结构
 
 ```text
-managed-core.json       Embedded, reviewable official-core release contract
-src/core/               Version parsing, manifest validation, and compatibility policy
-src/system.rs           Trusted root files, sanitized commands, and private temporary paths
-src/core_package/       Download, integrity, Deb metadata, extraction, and secure temporary files
-src/core_manager/       Managed-core facade, inventory, immutable storage, and tests
-src/core_upgrade/       Candidate orchestration, activation, API health checks, and rollback
-src/runtime/            Runtime facade, installation, systemd lifecycle, and tests
-src/mihomo.rs           External Controller API boundary
-packaging/debian/       Unit and maintainer-script templates
-packaging/rpm/          Standard RPM spec template
-scripts/lib/release.sh  Shared manifest, download, ELF, and checksum policy
-scripts/build-*.sh      Native ELF, Deb, and RPM release builders
-docs/managed-core.md    Architecture, security boundaries, and operations
+managed-core.json       可内嵌、可审查的官方内核发布约定
+src/core/               版本解析、清单校验与兼容策略
+src/system.rs           可信 root 文件、命令清理与私有临时路径
+src/core_package/       下载、完整性、Deb 元数据、提取与安全临时文件
+src/core_manager/       托管内核门面、清单、不可变存储与测试
+src/core_upgrade/       候选编排、激活、API 健康检查与回滚
+src/runtime/            运行时门面、安装、systemd 生命周期与测试
+src/mihomo.rs           外部 Controller API 边界
+packaging/debian/       unit 与维护者脚本模板
+packaging/rpm/          标准 RPM spec 模板
+scripts/lib/release.sh  共享清单、下载、ELF 与校验和策略
+scripts/build-*.sh      原生 ELF、Deb 与 RPM 发布构建器
+docs/managed-core.md    架构、安全边界与运维说明
 ```
 
-## Code Style
+## 代码风格
 
-Use explicit result types at trust boundaries and keep policy pure so it can be tested without root,
-network, or filesystem access:
+在信任边界使用显式结果类型，并保持策略函数纯净，使其无需 root、网络或文件系统即可测试：
 
 ```rust
 pub fn compatibility(version: CoreVersion) -> Compatibility {
@@ -70,156 +64,115 @@ pub fn compatibility(version: CoreVersion) -> Compatibility {
 }
 ```
 
-Release metadata belongs in the manifest. Runtime code must not duplicate version strings, package
-names, architectures, or hashes.
+发布元数据只属于清单。运行时代码不得重复保存版本字符串、包名、架构或哈希。
 
-## Testing Strategy
+## 测试策略
 
-- Small unit tests validate manifest structure, supported targets, version output parsing, and every
-  compatibility boundary.
-- Existing runtime tests continue covering URL allowlists, size caps, SHA-256 verification, deb
-  metadata, systemd ownership checks, and install planning.
-- The full Rust test suite, formatter, Clippy with warnings denied, and release build are required for
-  every manifest or runtime change.
-- Disposable native runners install and remove each architecture bundle, assert that the service
-  remains disabled and inactive, verify managed layout discovery, and prove package reinstall does
-  not replace the operator-selected active core.
-- Fake activation operations cover successful restart/health, failed-health rollback, rollback
-  health, and combined activation/rollback errors without mutating the test host.
+- 小型单元测试覆盖清单结构、支持目标、版本输出解析和每个兼容边界。
+- 现有运行时测试继续覆盖 URL 白名单、大小上限、SHA-256 校验、Deb 元数据、systemd 所有权检查和安装规划。
+- 每次清单或运行时变更都必须通过完整 Rust 测试、格式检查、禁止警告的 Clippy 和 release 构建。
+- 一次性原生 runner 会安装和卸载各架构软件包，确认服务保持禁用和停止，验证托管布局发现，并证明重新安装软件包不会替换运维人员选中的当前内核。
+- 伪激活操作会覆盖重启和健康检查成功、健康检查失败后回滚、回滚健康检查，以及激活与回滚同时失败；测试不会改变测试主机。
 
-## Boundaries
+## 安全边界
 
-Always:
+始终遵守：
 
-- use the official `MetaCubeX/mihomo` GitHub release path over HTTPS;
-- cap downloads, restrict redirects, verify SHA-256, and verify deb package metadata;
-- require an explicit user action before installing or upgrading a core;
-- stage and validate a candidate before changing the active core;
-- retain the previous working core until the replacement passes health checks;
-- keep external-controller mode free of local runtime mutations.
+- 只通过 HTTPS 使用官方 `MetaCubeX/mihomo` GitHub Release 路径；
+- 限制下载大小和重定向，校验 SHA-256 与 Deb 包元数据；
+- 安装或升级内核前要求用户显式操作；
+- 改变当前内核前先暂存并校验候选版本；
+- 新版本通过健康检查前保留旧的可用内核；
+- 外部 Controller 模式不得改变本机运行时。
 
-Ask first:
+实施前必须先确认：
 
-- expanding supported operating systems, service managers, architectures, or release hosts;
-- changing the tested compatibility range without integration-test evidence;
-- changing the core installation layout or taking ownership of an existing unmanaged service;
-- adding automatic upgrade execution to normal TUI startup.
+- 扩展支持的操作系统、服务管理器、架构或 Release 主机；
+- 在没有集成测试证据的情况下更改受测兼容范围；
+- 更改内核安装布局，或接管已有且未受管的服务；
+- 让 TUI 普通启动自动执行升级。
 
-Never:
+绝不允许：
 
-- copy Mihomo source into this repository or expose it through in-process FFI;
-- silently follow the latest upstream release;
-- run a downloaded artifact before integrity and package metadata checks pass;
-- overwrite a partial or unmanaged installation;
-- display or log Controller secrets or subscription credentials.
+- 把 Mihomo 源码复制进本仓库，或通过进程内 FFI 暴露；
+- 静默跟随上游最新 Release；
+- 在完整性和包元数据检查通过前运行下载的产物；
+- 覆盖不完整安装或未受管安装；
+- 显示或记录 Controller 密钥及订阅凭据。
 
-## Managed-Core Lifecycle
+## 托管内核生命周期
 
-### Release Contract
+### 发布约定
 
-- Embed one validated managed-core manifest.
-- Select packages by operating system and architecture through that manifest.
-- Parse the installed core version and require it to be in the tested compatibility range before a
-  locally managed apply.
-- Keep normal startup and configuration apply free of upgrade behavior.
+- 内嵌一份经过校验的托管内核清单。
+- 通过该清单按操作系统和架构选择软件包。
+- 解析已安装内核版本；本机托管应用前，要求该版本位于受测兼容范围。
+- 普通启动和配置应用不得包含升级行为。
 
-### Explicit Staged Upgrade
+### 显式分阶段升级
 
-- `mihomo-tui core status` reports the installed, active, recommended, and compatible versions without
-  changing the host.
-- `sudo mihomo-tui core upgrade` is the only upgrade entry point. Normal startup and `p` never invoke
-  it.
-- Managed binaries live at `/usr/lib/mihomo-tui/cores/<version>/mihomo`. The root-owned
-  `/usr/lib/mihomo-tui/current` symlink selects one immutable version directory.
-- The systemd drop-in starts `/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui`.
-- Upgrade reuses an already installed recommended candidate when available. Otherwise it downloads
-  and verifies the official Deb, extracts only its Mihomo binary into a private staging directory,
-  verifies its exact version, and validates the owned config with that candidate.
-- Before first activation, the current trusted binary is copied into its own version directory so it
-  is always available for rollback.
-- Activation atomically replaces the `current` symlink, reloads systemd, restarts the service, then
-  checks `/version` and `/proxies` through the controller discovered from the owned config.
-- Any activation, restart, version, or proxy health failure atomically restores the previous symlink,
-  restarts the previous core, verifies rollback health, and returns an error describing both failures
-  when rollback is also unhealthy.
-- A successful upgrade retains the previous core for automatic rollback evidence and operator
-  inspection, and removes unrelated staging files. Re-running upgrade at the recommended version is
-  an idempotent no-op.
+- `mihomo-tui core status` 报告已安装、当前、推荐和兼容版本，不改变主机。
+- `sudo mihomo-tui core upgrade` 是唯一升级入口。普通启动和按 `p` 都不会调用它。
+- 受管二进制位于 `/usr/lib/mihomo-tui/cores/<version>/mihomo`。root 所有的 `/usr/lib/mihomo-tui/current` 符号链接选择一个不可变版本目录。
+- systemd drop-in 启动 `/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui`。
+- 如果推荐候选版本已经安装，升级会直接复用。否则，程序下载并校验官方 Deb，只把其中的 Mihomo 二进制提取到私有暂存目录，校验精确版本，再使用该候选版本校验受管配置。
+- 首次激活前，当前可信二进制会被复制到自己的版本目录，保证始终可用于回滚。
+- 激活会原子替换 `current` 链接，重新加载 systemd，重启服务，再通过受管配置发现的 Controller 检查 `/version` 与 `/proxies`。
+- 任何激活、重启、版本或代理健康检查失败，都会原子恢复旧链接，重启旧内核并验证回滚健康状态。如果回滚也不健康，返回的错误会同时说明两个失败原因。
+- 升级成功后保留旧内核，供自动回滚取证和运维检查，并清除无关暂存文件。在推荐版本上重新运行升级是幂等的空操作。
 
-### Release Synchronization
+### 发布同步
 
-- Detect the latest published, non-draft, non-prerelease Mihomo release through GitHub's documented
-  `GET /repos/MetaCubeX/mihomo/releases/latest` endpoint.
-- Generate a manifest-update branch and pull request with package metadata and hashes. The workflow
-  receives only `contents: write` and `pull-requests: write` permissions.
-- Run the architecture build matrix and disposable-host integration tests.
-- Require human approval before publishing a new paired `mihomo-tui` release.
-- Patch releases inside the existing compatibility range can be proposed automatically. A release
-  outside that range fails closed and requires a reviewed compatibility-policy change.
+- 通过 GitHub 文档规定的 `GET /repos/MetaCubeX/mihomo/releases/latest` 端点，只检测已发布、非草稿且非预发布的最新 Mihomo Release。
+- 生成清单更新分支和 Pull Request，其中包含包元数据与哈希。工作流仅获得 `contents: write` 和 `pull-requests: write` 权限。
+- 运行架构构建矩阵和一次性主机集成测试。
+- 发布新的配套 `mihomo-tui` Release 前必须人工批准。
+- 现有兼容范围内的补丁版本可由自动化提出；范围外的 Release 默认拒绝，必须经过兼容策略变更审查。
 
-### Bundled Distribution
+### 随包分发
 
-- Build Debian packages with `dpkg-deb --build --root-owner-group` and RPM packages with standard
-  `rpmbuild`. Both packages contain
-  `mihomo-tui`, the tested official core under `bundled/<version>`, the `mihomo.service` unit,
-  license/source notices, and maintainer scripts.
-- On install, `postinst` creates a hard link at `cores/<version>/mihomo` after validating root
-  ownership, permissions, and immutable same-version bytes. It creates `current` only when no active
-  link exists. The managed hard link is deliberately not owned by the package manager, so replacing a package
-  payload cannot delete the active or rollback core.
-- Installing a newer bundle registers its core but preserves `current`. Activation remains an
-  explicit `sudo mihomo-tui core upgrade` transaction.
-- The bundle conflicts with a separately packaged `mihomo` because both would own the same service;
-  users must explicitly choose bundled or externally managed mode.
-- Publish SHA-256 checksums for every Deb, RPM, and native ELF architecture artifact.
-- Keep external mode available for users who manage Mihomo separately.
+- 使用 `dpkg-deb --build --root-owner-group` 构建 Debian 包，使用标准 `rpmbuild` 构建 RPM。两种软件包都包含 `mihomo-tui`、位于 `bundled/<version>` 的受测官方内核、`mihomo.service` unit、许可证/源码声明和维护者脚本。
+- 安装时，`postinst` 校验 root 所有权、权限和同版本不可变字节后，在 `cores/<version>/mihomo` 创建硬链接。只有没有当前链接时才创建 `current`。该受管硬链接有意不归包管理器所有，因此替换软件包载荷不会删除当前或回滚内核。
+- 安装新版软件包只注册其内核并保留 `current`。激活仍必须显式执行 `sudo mihomo-tui core upgrade` 事务。
+- 随包版本与单独安装的 `mihomo` 软件包冲突，因为二者都会拥有同一个服务；用户必须明确选择随包托管模式或外部管理模式。
+- 每个 Deb、RPM 和原生 ELF 架构产物都必须发布 SHA-256 校验文件。
+- 对于自行管理 Mihomo 的用户，继续提供外部模式。
 
-## Upgrade Transaction
+## 升级事务
 
 ```text
-lock -> inspect current -> reuse installed candidate or download/hash/deb/extract
-     -> candidate version/config checks -> stage immutable version
-     -> atomically switch current -> daemon-reload -> restart -> API health
-     -> success: retain old version
-     -> failure: atomically switch old current -> restart -> rollback health
+加锁 -> 检查当前版本 -> 复用已安装候选版本，或下载/哈希/Deb 校验/提取
+     -> 候选版本与配置检查 -> 暂存不可变版本
+     -> 原子切换 current -> daemon-reload -> 重启 -> API 健康检查
+     -> 成功：保留旧版本
+     -> 失败：原子切回旧 current -> 重启 -> 回滚健康检查
 ```
 
-Every path before the atomic link switch is side-effect free outside private staging and an optional
-new immutable version directory. The active service is never stopped merely to download or inspect a
-candidate.
+原子切换链接之前的每条路径，除了私有暂存区和可选的新不可变版本目录外，都不产生副作用。服务绝不会仅仅为了下载或检查候选版本而停止。
 
-## Authoritative Sources
+## 权威资料
 
-- GitHub latest release API: <https://docs.github.com/en/rest/releases/releases#get-the-latest-release>
-- GitHub Actions workflow syntax and permissions:
-  <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax>
-- GitHub CLI pull-request creation: <https://cli.github.com/manual/gh_pr_create>
-- Debian archive operations use the installed `dpkg-deb` interface (`--field`, `--extract`, and
-  `--build --root-owner-group`) and verify its availability as a trusted root executable.
+- [GitHub 获取最新 Release API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+- [GitHub Actions 工作流语法与权限](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)
+- [GitHub CLI 创建 Pull Request](https://cli.github.com/manual/gh_pr_create)
+- Debian 归档操作使用已安装的 `dpkg-deb` 接口（`--field`、`--extract` 和 `--build --root-owner-group`），并确认它可作为可信 root 可执行文件使用。
 
-## Success Criteria
+## 成功条件
 
-The implementation is ready for a reviewed release when:
+满足以下条件后，实施内容才可进入 Release 审查：
 
-- one manifest is the only source of recommended version, compatible range, package names, package
-  versions, architectures, and hashes;
-- malformed or incomplete embedded release metadata fails closed;
-- installed core version output is parsed without substring matching;
-- local apply accepts tested versions and rejects too-old or untested-newer versions with actionable
-  errors;
-- external mode and clean-host install behavior remain unchanged;
-- upgrade is explicit, staged, health-checked, idempotent, and rollback-tested;
-- upstream synchronization creates reviewable PRs and cannot widen compatibility automatically;
-- both supported architecture packages build, contain the expected files, pass metadata inspection,
-  install on disposable runners, and publish checksums;
-- all verification commands pass without changing the running host service.
+- 一份清单是推荐版本、兼容范围、包名、包版本、架构和哈希的唯一来源；
+- 内嵌发布元数据格式错误或不完整时默认拒绝；
+- 解析已安装内核版本输出时不使用子字符串匹配；
+- 本机应用接受受测版本，并以可操作的错误拒绝过旧或未经测试的新版本；
+- 外部模式和全新主机安装行为保持不变；
+- 升级是显式、分阶段、带健康检查、幂等且经过回滚测试的事务；
+- 上游同步创建可审查的 Pull Request，且不能自动扩大兼容范围；
+- 两种支持架构的软件包都能构建，包含预期文件，通过元数据检查，在一次性 runner 上安装，并发布校验和；
+- 所有验证命令均通过，且不改变主机上正在运行的服务。
 
-## Release Gate
+## 发布门禁
 
-No bundle is published until the bundled Mihomo license text and corresponding source URL are
-present, the disposable-host package tests and rollback tests pass, and a human approves the release
-PR. The repository must also declare the mihomo-tui project's own license and a real package
-maintainer identity before public distribution; the current automated checks cover the bundled
-Mihomo GPL-3.0 material but cannot choose a license or copyright holder for this project. Absence of
-either project's license material, source information, rollback evidence, or architecture coverage
-blocks release.
+随包 Mihomo 的许可证文本和对应源码 URL 必须存在，一次性主机软件包测试与回滚测试必须通过，并且人工批准 Release Pull Request，之后才能发布软件包。在公开分发前，仓库还必须声明 `mihomo-tui` 项目自身的许可证和真实的软件包维护者身份；当前自动检查覆盖随包 Mihomo 的 GPL-3.0 材料，但不能替本项目选择许可证或版权持有人。
+
+缺少任一项目的许可证材料、源码信息、回滚证据或架构覆盖都会阻止发布。

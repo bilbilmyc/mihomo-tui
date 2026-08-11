@@ -1,80 +1,54 @@
-# ADR-0001: Bundle Mihomo As A Separate Process
+# ADR-0001：将 Mihomo 作为独立进程随包分发
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-10
 
-## Context
+## 背景
 
-`mihomo-tui` needs to work as one installable application rather than requiring users to assemble a
-Rust TUI, a compatible Mihomo binary, a service unit, and matching configuration by hand. At the
-same time, Mihomo is an independently released Go project with its own lifecycle, license, runtime
-state, and Controller API.
+`mihomo-tui` 需要成为一套可独立安装的应用，而不是要求用户手工组合 Rust TUI、兼容的 Mihomo 二进制、服务 unit 和匹配的配置。与此同时，Mihomo 是独立发布的 Go 项目，拥有自己的生命周期、许可证、运行时状态和 Controller API。
 
-The design must support offline configuration editing, explicit privileged operations, safe core
-updates, rollback, amd64 and arm64 packages, and continued use of externally managed Mihomo
-controllers. Upstream updates must not silently expand the tested compatibility range.
+该设计必须支持离线编辑配置、显式执行特权操作、安全升级和回滚内核、生成 amd64 与 arm64 软件包，并继续支持外部管理的 Mihomo Controller。上游更新不得静默扩大受测兼容范围。
 
-## Decision
+## 决策
 
-Distribute a single Debian package containing `mihomo-tui` and a pinned official Mihomo release, but
-run Mihomo as a separate operating-system process.
+分发一个同时包含 `mihomo-tui` 和固定官方 Mihomo 版本的 Debian 软件包，但让 Mihomo 作为独立的操作系统进程运行。
 
-Use `managed-core.json` as the reviewable source of truth for the upstream repository, recommended
-version, compatibility range, architecture-specific Deb assets, Deb metadata, SHA-256 hashes, and
-license hash. Runtime and packaging code fail closed when that contract is malformed.
+使用 `managed-core.json` 作为可审查的唯一事实来源，记录上游仓库、推荐版本、兼容范围、各架构 Deb 产物、Deb 元数据、SHA-256 和许可证哈希。清单格式不正确时，运行时和打包代码均采用默认拒绝策略。
 
-Store active and rollback binaries in immutable version directories under
-`/usr/lib/mihomo-tui/cores`. Select one version with an atomically replaced relative `current`
-symlink. Package payloads live under `bundled`; `postinst` hard-links them into the managed layout so
-dpkg can replace payloads without deleting an active or rollback inode.
+当前版本和回滚版本存储在 `/usr/lib/mihomo-tui/cores` 下的不可变版本目录中，通过原子替换的相对 `current` 符号链接选择版本。软件包载荷位于 `bundled`；`postinst` 将其硬链接到托管布局，使 dpkg 替换载荷时不会删除当前或回滚内核对应的 inode。
 
-Make core activation a separate explicit command. `core upgrade` validates the candidate and owned
-config, switches atomically, restarts Mihomo, checks the Controller `/version` and `/proxies`
-endpoints, and restores the previous version on failure. Installing a package registers a candidate
-but does not switch an existing `current` link or start the service.
+内核激活使用独立的显式命令。`core upgrade` 会校验候选内核和受管配置，原子切换版本，重启 Mihomo，检查 Controller 的 `/version` 与 `/proxies` 端点，并在失败时恢复旧版本。安装软件包只注册候选版本，不切换已有 `current` 链接，也不启动服务。
 
-Use scheduled automation only to propose manifest updates inside the existing compatibility range.
-The proposal must pass native package builds and disposable-host tests before a human reviews it.
+定时自动化只在现有兼容范围内提出清单更新。提案必须通过原生软件包构建和一次性主机测试，再由人工审查。
 
-## Alternatives Considered
+## 备选方案
 
-### Link Or Port Mihomo Into The Rust Process
+### 将 Mihomo 链接或移植到 Rust 进程
 
-Rejected. It would turn this repository into a source fork or FFI integration, couple Rust releases
-to Go internals, enlarge the privilege and crash boundary, and make external-controller mode harder
-to preserve. The stable Controller API already provides the required process boundary.
+不采用。该方案会把本仓库变成源码分支或 FFI 集成，让 Rust 发布与 Go 内部实现耦合，扩大特权和崩溃边界，也更难保留外部 Controller 模式。稳定的 Controller API 已经提供了所需的进程边界。
 
-### Require A Separately Installed Mihomo Package
+### 要求用户单独安装 Mihomo 软件包
 
-Rejected as the primary distribution. It keeps the TUI technically dependent on user-managed
-version selection and service layout, so it does not deliver one independently installable product.
-External mode remains available for users who intentionally want that ownership split.
+不作为主要分发方式。这样仍会让 TUI 依赖用户自行选择版本和服务布局，无法提供一套可独立安装的产品。对于有意自行管理 Mihomo 的用户，外部模式仍然保留。
 
-### Follow The Latest Upstream Release At Runtime
+### 运行时跟随最新上游版本
 
-Rejected. Runtime latest checks would make normal startup nondeterministic and could activate an
-untested core. Compatibility changes require code review and architecture evidence, not a successful
-HTTP request.
+不采用。运行时检查最新版本会让普通启动变得不确定，并可能激活未经测试的内核。兼容性变更需要代码审查和架构测试证据，不能只依赖一次成功的 HTTP 请求。
 
-### Activate A New Core During Package Upgrade
+### 软件包升级时激活新内核
 
-Rejected. Dpkg installation cannot perform the full Controller health transaction safely and would
-bypass automatic rollback. Package upgrade therefore stages/registers a candidate; activation is a
-separate explicit command.
+不采用。dpkg 安装过程无法安全执行完整的 Controller 健康检查事务，也会绕过自动回滚。因此，软件包升级只暂存或注册候选版本；激活必须使用独立的显式命令。
 
-## Consequences
+## 影响
 
-- Users receive one Deb with the TUI, core, unit, checksums, and upstream license/source material.
-- Mihomo crashes and upgrades remain isolated from the TUI process.
-- Package and core versions can move together through reviewed pull requests without becoming one
-  source tree or one process.
-- Old managed cores consume directory entries but hard links avoid duplicating package payload data.
-- Managed local mode requires root, systemd, trusted filesystem ownership, and a Controller address
-  in the owned config; external mode remains non-mutating.
-- Maintainers must track both projects' license obligations and cannot publish until the
-  mihomo-tui project's own license and maintainer identity are declared.
+- 用户获得一份同时包含 TUI、内核、unit、校验和以及上游许可证/源码材料的 Deb。
+- Mihomo 的崩溃和升级与 TUI 进程保持隔离。
+- 软件包与内核版本可以通过经过审查的 Pull Request 一起推进，但不会合并成同一个源码树或同一个进程。
+- 旧托管内核会占用目录项，但硬链接可避免重复存储软件包载荷。
+- 本机托管模式要求 root、systemd、可信文件系统所有权，并要求受管配置中存在 Controller 地址；外部模式继续保持非变更性。
+- 维护者必须同时履行两个项目的许可证义务；在声明 `mihomo-tui` 自身的许可证和维护者身份之前，不得发布软件包。

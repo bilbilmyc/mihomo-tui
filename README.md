@@ -1,193 +1,98 @@
+<div align="center">
+
 # mihomo-tui
 
-An SSH-friendly terminal control center for [Mihomo](https://github.com/MetaCubeX/mihomo).
+**面向 Linux 服务器、适合通过 SSH 使用的 Mihomo 终端控制中心**
 
-The project owns one native Mihomo configuration file. Subscriptions, rules, TUN, and DNS can be
-edited while Mihomo is stopped, missing, or unreachable, and the managed Mihomo service reads that
-same file directly.
+在一个原生配置文件中管理订阅、代理、规则、TUN 与 DNS，并以可审计、可回滚的方式管理 Mihomo 内核。
 
-The Deb and RPM bundles are standalone application distributions: each contains `mihomo-tui`, a
-reviewed official Mihomo binary, the service unit, license/source notices, and the versioned
-managed-core layout. Mihomo remains a separate process rather than being linked into the Rust
-program. Release builds also provide a directly executable Linux ELF for external-controller use.
+[![持续集成](https://github.com/bilbilmyc/mihomo-tui/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/bilbilmyc/mihomo-tui/actions/workflows/ci.yml)
+[![Rust 2024](https://img.shields.io/badge/Rust-2024-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![运行平台](https://img.shields.io/badge/Linux-x86__64%20%7C%20aarch64-2f6f4e?logo=linux&logoColor=white)](#系统要求)
+[![项目许可证](https://img.shields.io/badge/许可证-尚未声明-d97706)](#许可证)
 
-For installation, first use, service enablement, upgrades, logs, and configuration recovery, see the
-Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installed by Deb and RPM at
-`/usr/share/doc/mihomo-tui/server-guide.md`.
+[快速开始](#快速开始) · [安装](#安装) · [使用说明](#使用说明) · [项目文档](#项目文档) · [参与贡献](#参与贡献)
 
-## Capabilities
+</div>
 
-- Ratatui dashboard with Status, Proxies, Rules, and Config pages
-- Single native configuration at `/etc/mihomo-tui/config.yaml`
-- One-time, lossless import from an existing Mihomo YAML configuration
-- Offline subscription, rule, TUN, and DNS editing without a Mihomo binary
-- Explicit validation, core reload, and subscription verification
-- Optional Mihomo installation during explicit apply on supported Linux hosts
-- Read-only `mihomo-tui core status` inventory and explicit transactional `core upgrade`
-- Versioned managed cores with atomic activation, API health checks, and automatic rollback
-- Native x86_64 and aarch64 Deb, RPM, and ELF artifacts with SHA-256 checksums
-- Mihomo `/proxies` API discovery and refresh
-- Proxy-group selection through the controller API
-- Reads and edits the single native YAML for rules, providers, TUN, DNS, port, and mode
-- TUN settings for stack, device, routes, DNS hijacking, MTU, and excluded networks
-- DNS settings for listen address, enhanced mode, Fake IP ranges, IPv6, HTTP/3, and routing rules
-- Custom rule creation at the top or bottom, editing, removal marking, and priority reordering
-- Syntax-checked atomic writes with private backups
-- A managed systemd drop-in that points Mihomo directly at `/etc/mihomo-tui`
-- ASCII-compatible UI for SSH terminals without Nerd Fonts
+> [!IMPORTANT]
+> 本仓库目前尚未声明 `mihomo-tui` Rust 源码的项目级许可证。公开可见不等于获得复制、修改或分发授权；打包发布仍需维护者先明确许可证与版权信息。随包提供的 Mihomo GPL-3.0 材料只适用于 Mihomo 本身。
 
-## Linux Release Artifacts
+## 项目简介
 
-Every supported architecture produces three release formats:
+`mihomo-tui` 管理唯一一份原生 Mihomo YAML：`/etc/mihomo-tui/config.yaml`。即使 Mihomo 尚未安装、已经停止或暂时无法连接，仍可离线编辑订阅、规则、TUN 和 DNS；应用配置时，受管的 Mihomo 服务会直接读取同一个文件，不生成第二份运行时副本。
 
-- `mihomo-tui_*_amd64.deb` or `*_arm64.deb`: complete Debian/Ubuntu bundle;
-- `mihomo-tui-*.x86_64.rpm` or `*.aarch64.rpm`: complete RPM/systemd bundle;
-- `mihomo-tui-*-linux-x86_64` or `*-linux-aarch64`: unpackaged TUI executable.
+Deb 与 RPM 是完整的软件包，包含 `mihomo-tui`、经过固定和校验的官方 Mihomo 二进制、systemd unit、许可证/源码声明以及带版本的托管内核目录。Mihomo 始终作为独立进程运行，不会链接进 Rust 程序。项目同时提供仅包含 TUI 的原生 ELF，用于连接已有 Controller。
 
-Build and verify all formats on a native x86_64 or aarch64 Debian/Ubuntu build host:
+## 核心特性
+
+- 基于 Ratatui 的状态、代理、规则和配置四个工作区
+- 通过一个原生 YAML 管理订阅、规则、TUN、DNS、端口和运行模式
+- 首次启动可无损导入现有 Mihomo 配置，并保留未知或自定义字段
+- 配置原子写入、权限为 `0600` 的私有备份及写入前语法检查
+- 通过 Controller API 获取代理组、切换节点、刷新数据和测试延迟
+- 显式应用配置，不在启动或普通编辑过程中隐式安装、升级或重载内核
+- 带版本的不可变内核目录、原子激活、API 健康检查和失败自动回滚
+- 原生 `x86_64` / `aarch64` Deb、RPM 与 ELF 发布物及 SHA-256 校验文件
+- 适配普通 SSH 终端，不依赖 Nerd Fonts
+
+## 快速开始
+
+在受支持的 Debian/Ubuntu 服务器上安装 Deb：
 
 ```bash
-rust_arch=$(uname -m)
-deb_arch=$(dpkg --print-architecture)
-cargo build --release --locked
-./scripts/build-native.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
-./scripts/build-deb.sh --architecture "$deb_arch" --binary target/release/mihomo-tui
-./scripts/build-rpm.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
-./scripts/test-native-binary.sh dist/mihomo-tui-*-linux-"$rust_arch"
-./scripts/test-deb-package.sh dist/*.deb
-./scripts/test-rpm-package.sh dist/*.rpm
-```
-
-The package builders download only the pinned official release from `managed-core.json`, limit
-artifact sizes, verify SHA-256 and Deb metadata, validate both native ELFs, and emit a checksum next
-to every artifact. `rpmbuild` and `rpm`/`rpm2cpio` are required for the RPM path.
-
-Install the bundle with dependency resolution:
-
-```bash
-sudo apt install ./dist/mihomo-tui_*.deb
+sha256sum --check mihomo-tui_*.deb.sha256
+sudo apt install ./mihomo-tui_*.deb
 mihomo-tui core status
 sudo mihomo-tui
 ```
 
-Install the equivalent RPM bundle with:
+首次进入 TUI 后完成配置，按 `p` 校验配置并启动或重载 Mihomo。软件包安装本身不会启用或启动 `mihomo.service`；确认首次应用成功后，如需开机启动，再执行：
 
 ```bash
-sudo dnf install ./dist/mihomo-tui-*.rpm
-mihomo-tui core status
-sudo mihomo-tui
+sudo systemctl enable mihomo.service
 ```
 
-The unpackaged ELF does not contain Mihomo or a service unit. Verify its checksum, install it under a
-local binary path, and connect it to an existing controller:
+服务器安装、升级、日志与恢复操作请直接阅读[《Linux 服务器使用手册》](docs/server-guide.md)。Deb 和 RPM 也会把该手册安装到 `/usr/share/doc/mihomo-tui/server-guide.md`。
+
+## 安装
+
+### Deb：Debian / Ubuntu
+
+```bash
+sha256sum --check mihomo-tui_*.deb.sha256
+sudo apt install ./mihomo-tui_*.deb
+```
+
+### RPM：Fedora / RHEL 系发行版
+
+```bash
+sha256sum --check mihomo-tui-*.rpm.sha256
+sudo dnf install ./mihomo-tui-*.rpm
+```
+
+Deb 与 RPM 都包含受管 Mihomo 内核和 systemd unit。全新安装会拒绝覆盖已有的 Mihomo 二进制、服务或托管目录；遇到冲突时，应先确认现有安装的来源，或改用外部 Controller 模式。
+
+### 原生 ELF：连接已有 Controller
+
+原生 ELF 只包含 TUI，不包含 Mihomo 和 systemd unit：
 
 ```bash
 sha256sum --check mihomo-tui-*-linux-$(uname -m).sha256
 sudo install -m 755 mihomo-tui-*-linux-$(uname -m) /usr/local/bin/mihomo-tui
-MIHOMO_SECRET='your-secret' mihomo-tui --controller http://127.0.0.1:9093
+MIHOMO_SECRET='你的密钥' mihomo-tui --controller http://127.0.0.1:9093
 ```
 
-Installation does not enable or start `mihomo.service`. On a fresh install, the packaged core is
-registered under `/usr/lib/mihomo-tui/cores/<version>` and selected by `current`. The first TUI run
-creates or imports `/etc/mihomo-tui/config.yaml`; pressing `p` explicitly validates the config and
-starts or reloads the managed service.
-
-A fresh package install stops before unpacking if it finds existing Mihomo or mihomo-tui binaries,
-a managed-core root, or a Mihomo systemd unit/drop-in in the paths owned by the bundle. Remove the
-conflicting local installation first, or keep it and run the standalone TUI in external-controller
-mode. Package upgrades skip this fresh-install guard and preserve the selected managed core.
-
-For a paired package/core update, install the reviewed new Deb or RPM first, inspect both versions, then
-activate explicitly:
+### 从源码构建
 
 ```bash
-sudo apt install ./mihomo-tui_NEW_VERSION.deb
-# RPM hosts: sudo dnf upgrade ./mihomo-tui_NEW_VERSION.rpm
-mihomo-tui core status
-sudo mihomo-tui core upgrade
-```
-
-Package upgrade registers the new core but preserves the active core and rollback binary. The
-explicit upgrade validates the already installed candidate, atomically switches `current`, restarts
-Mihomo, checks `/version` and `/proxies`, and restores the previous core if activation fails.
-
-See [`docs/release-artifacts.md`](docs/release-artifacts.md) for artifact contracts and CI, and
-[`docs/debian-package.md`](docs/debian-package.md) for managed package lifecycle and license gates.
-
-## Run From Source
-
-Build the program, then run it as root when using the default system paths:
-
-```bash
-cargo build --release
+git clone https://github.com/bilbilmyc/mihomo-tui.git
+cd mihomo-tui
+cargo build --release --locked
 sudo ./target/release/mihomo-tui
 ```
 
-Startup does not install, start, validate, or reload Mihomo. On first use, the program imports
-`/etc/mihomo/config.yaml` into `/etc/mihomo-tui/config.yaml`. If no legacy config exists, it creates
-a minimal native config. Once the owned config exists, the legacy file is never read again.
-
-The owned file is directly usable by Mihomo and retains fields mihomo-tui does not understand:
-
-```yaml
-mixed-port: 7890
-external-controller: 127.0.0.1:9093
-rules:
-  - MATCH,DIRECT
-```
-
-Edits are written directly to `/etc/mihomo-tui/config.yaml`. Press `p` to validate that same file,
-configure `mihomo.service` to use `/etc/mihomo-tui` as its data directory, reload the core, and
-verify HTTP subscriptions. Neither editing nor applying writes `/etc/mihomo/config.yaml`.
-
-Early mihomo-tui builds used a `kind/backend/profile` wrapper. Startup automatically migrates that
-wrapper to native Mihomo YAML and keeps a private backup.
-
-When running only the Rust binary from source on a clean Debian/Ubuntu host, the first explicit apply
-can download the pinned official `v1.19.29` package, verify its SHA-256 and Deb metadata, install it
-through `dpkg`, configure the runtime service, and then load the single config. Downloaded artifacts
-stay root-owned from creation through installation.
-
-Automatic installation currently supports `x86_64` and `aarch64` Debian/Ubuntu systems running
-systemd. It never upgrades an existing installation and refuses to overwrite a partial installation
-where only the binary or service exists.
-
-## Managed Core Policy
-
-Mihomo remains a separate process, but its tested release contract is part of the product. The
-embedded [`managed-core.json`](managed-core.json) manifest is the only source of package names,
-architectures, versions, license hash, and SHA-256 hashes used by the installer and bundle builder.
-The current contract recommends `v1.19.29` and accepts installed versions from `v1.19.28` up to, but
-not including, `v1.20.0` for locally managed apply.
-
-Pressing `p` checks an existing local core against that tested range before validating or reloading
-the configuration. A too-old or untested-newer core is left untouched and produces an actionable
-error. Existing cores are never silently upgraded, and normal startup never checks for or installs a
-new upstream release.
-
-Upstream versions enter `mihomo-tui` through an automated proposal branch and reviewed pull request.
-The proposal fails closed outside the compatibility range and must pass Rust tests, Clippy, native
-amd64/arm64 package builds, archive inspection, disposable-runner installation, and transaction
-rollback tests. Normal startup and `p` never run `core upgrade`.
-
-Inspect or explicitly upgrade the managed core:
-
-```bash
-mihomo-tui core status
-sudo mihomo-tui core upgrade
-```
-
-The complete contract is documented in [`docs/managed-core.md`](docs/managed-core.md), and the
-architectural rationale is recorded in
-[`ADR-0001`](docs/decisions/0001-bundle-mihomo-as-a-separate-process.md).
-
-Prevent downloads during explicit apply:
-
-```bash
-sudo ./target/release/mihomo-tui --no-auto-install
-```
-
-Use custom paths for an isolated or unprivileged workspace:
+默认本机托管路径需要 root 权限。开发或隔离测试时可显式指定工作区，并关闭自动安装：
 
 ```bash
 cargo run -- \
@@ -196,55 +101,185 @@ cargo run -- \
   --no-auto-install
 ```
 
-`--workspace` / `MIHOMO_TUI_CONFIG` selects the single owned config. `--config` /
-`MIHOMO_CONFIG` selects a legacy config used only when the owned config does not exist. Supplying an
-explicit legacy config selects external mode and never manages local systemd.
+## 系统要求
 
-Connect to a running Mihomo controller:
+| 项目 | 支持范围 |
+| --- | --- |
+| 操作系统 | 使用 systemd 的 Linux；本机自动安装当前限 Debian/Ubuntu |
+| 架构 | `x86_64`、`aarch64` |
+| 终端 | 支持标准 ANSI 控制序列的 SSH 或本地终端 |
+| 权限 | 外部 Controller 模式通常无需 root；本机安装、应用和升级需要 root |
+| Mihomo | Deb/RPM 自带受测内核；外部模式可连接用户自行管理的 Controller |
+
+## 使用说明
+
+### 本机托管模式
+
+不传路径或 Controller 参数时，程序管理 `/etc/mihomo-tui/config.yaml`、本机 `mihomo.service` 和托管内核：
 
 ```bash
-cargo run -- \
-  --controller http://127.0.0.1:9093 \
-  --secret "$MIHOMO_SECRET"
+sudo mihomo-tui
 ```
 
-Or use environment variables:
+启动只打开并编辑配置，不会自动升级内核。按 `p` 才会校验配置、配置受管 systemd drop-in，并执行 `reload-or-restart`。
+
+### 外部 Controller 模式
+
+连接由其他工具管理的 Mihomo，不修改本机 systemd：
 
 ```bash
-MIHOMO_CONTROLLER=http://127.0.0.1:9093 \
-MIHOMO_SECRET=secret \
-cargo run
+MIHOMO_SECRET='你的密钥' \
+  mihomo-tui --controller http://127.0.0.1:9093
 ```
 
-An explicit `--controller`, `MIHOMO_CONTROLLER`, `--config`, `MIHOMO_CONFIG`, `--workspace`, or
-`MIHOMO_TUI_CONFIG` uses external mode and disables local systemd management. Offline edits remain
-available. An explicit controller never inherits the secret from the owned config; provide
-`--secret` or `MIHOMO_SECRET` for that controller.
+密钥优先通过 `MIHOMO_SECRET` 传入，避免出现在 shell 历史和进程列表中。远程 Controller 不应通过公网明文 HTTP 暴露。
 
-Keys:
+### 常用命令
 
-- `1`, `2`, `3`, `4`: switch pages
-- `Tab`: next page
-- `p`: validate the single config and reload the managed Mihomo core
-- `j`/`k` or arrow keys: move selection
-- `r`: refresh Mihomo data; on the configuration page, update the selected HTTP provider first
-- `a`: add an HTTP provider from the configuration page; using an existing HTTP provider name updates its URL
-- `e`: replace the selected HTTP provider URL from the configuration page
-- `Right` or `Enter`: enter the selected proxy group's node list; on the subscription page, open a selectable proxy group
-- `Left`: return to proxy groups
-- `Enter`: apply the selected node when the node list is focused
-- `l`: test the selected node's latency; results display as milliseconds, `timeout`, or `failed`
-- `t`/`d`: open advanced TUN/DNS settings from the status page
-- `a`/`A`: add a custom rule at the top/bottom of the rule list
-- `e`: edit the selected rule
-- In the rule editor, press `Enter` to open type/policy lists, move with arrows, and confirm with `Space` or `Enter`
-- `Space` or `x`: mark/unmark a rule for removal; `s` saves rule changes
-- `J`/`K`: move a rule down/up
-- `s`: save rule changes to the single configuration
-- `q` or `Esc`: quit
+| 命令 | 说明 |
+| --- | --- |
+| `mihomo-tui` | 启动终端界面 |
+| `mihomo-tui -h` | 查看完整中文帮助 |
+| `mihomo-tui core status` | 只读查看当前、已安装、推荐和兼容版本 |
+| `sudo mihomo-tui core upgrade` | 显式执行带健康检查和自动回滚的内核升级 |
+| `mihomo-tui --controller <地址>` | 连接已有 Controller |
+| `mihomo-tui --no-auto-install` | 应用配置时禁止安装缺失的 Mihomo |
 
-File providers have no remote subscription URL, so `r` cannot download a new source for them.
-Update the configured source file or replace the provider with an HTTP provider that has a URL.
+### 快捷键
 
-The complete migration, storage, and apply contract is documented in
-[`docs/independent-config.md`](docs/independent-config.md).
+| 按键 | 操作 |
+| --- | --- |
+| `1` / `2` / `3` / `4`、`Tab` | 切换状态、代理、规则和配置页面 |
+| `j` / `k`、方向键 | 移动选择 |
+| `Right` / `Enter`、`Left` | 进入或退出代理组节点列表 |
+| `Enter` | 应用选中的代理节点 |
+| `l` | 测试选中节点的延迟 |
+| `r` | 刷新 Mihomo 数据；配置页优先更新选中的 HTTP 订阅 |
+| `p` | 校验当前配置并启动或重载受管 Mihomo |
+| `t` / `d` | 从状态页打开 TUN / DNS 高级设置 |
+| `a` / `A` | 添加订阅，或在规则列表顶部 / 底部添加规则 |
+| `e` | 编辑选中的订阅或规则 |
+| `Space` / `x`、`s` | 标记规则删除、保存规则变更 |
+| `J` / `K` | 下移 / 上移规则 |
+| `q` / `Esc` | 退出 |
+
+## 配置模型
+
+默认配置文件可直接由 Mihomo 使用：
+
+```yaml
+mixed-port: 7890
+external-controller: 127.0.0.1:9093
+rules:
+  - MATCH,DIRECT
+```
+
+首次启动按以下顺序初始化：
+
+1. 如果 `/etc/mihomo-tui/config.yaml` 已存在，直接读取。
+2. 否则，如果显式指定了旧配置，完整导入该文件。
+3. 否则，如果 `/etc/mihomo/config.yaml` 存在，完整导入且不改动原文件。
+4. 都不存在时，创建最小原生配置。
+
+一旦受管配置存在，后续启动不会再次导入旧文件。完整存储、迁移与应用约定见[《单一配置约定》](docs/independent-config.md)。
+
+## 托管内核
+
+`managed-core.json` 是推荐版本、兼容范围、架构包名、包元数据、许可证哈希和 SHA-256 的唯一来源。普通启动和按 `p` 应用配置都不会执行内核升级。
+
+```bash
+mihomo-tui core status
+sudo mihomo-tui core upgrade
+```
+
+升级会复用已安装的候选版本，或下载并校验固定的官方 Deb；候选通过版本和配置校验后，程序原子切换 `current`，重启服务并检查 `/version` 与 `/proxies`。任一环节失败都会切回旧版本并再次检查健康状态。
+
+详细安全边界和发布流程见[《Mihomo 托管内核》](docs/managed-core.md)与 [ADR-0001](docs/decisions/0001-bundle-mihomo-as-a-separate-process.md)。
+
+```mermaid
+flowchart LR
+    A["TUI 离线编辑"] --> B["/etc/mihomo-tui/config.yaml"]
+    B --> C["候选内核校验配置"]
+    C --> D["原子切换 current"]
+    D --> E["重启 mihomo.service"]
+    E --> F["检查 /version 与 /proxies"]
+    F -->|"成功"| G["保留旧版本供回滚"]
+    F -->|"失败"| H["恢复旧版本并复检"]
+```
+
+## 项目结构
+
+```text
+src/app.rs             TUI 状态与页面流程
+src/config.rs          原生 Mihomo YAML 读取和编辑
+src/mihomo.rs          Controller API 边界
+src/core/              版本、清单和兼容策略
+src/core_manager/      托管内核清单与不可变存储
+src/core_upgrade/      激活、健康检查和回滚事务
+src/runtime/           安装与 systemd 生命周期
+managed-core.json      可审查的官方内核发布约定
+packaging/             Deb、RPM 与 systemd 模板
+scripts/               构建、发布和包验证脚本
+docs/                  运维、设计与发布文档
+```
+
+## 项目文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [Linux 服务器使用手册](docs/server-guide.md) | 安装、首次使用、升级、日志、故障排查和恢复 |
+| [单一配置约定](docs/independent-config.md) | 配置所有权、首次迁移、离线编辑和应用语义 |
+| [Mihomo 托管内核](docs/managed-core.md) | 架构、安全边界、升级事务和上游同步 |
+| [Debian 软件包运维](docs/debian-package.md) | Deb 构建、安装布局、升级与卸载 |
+| [Linux 发布物](docs/release-artifacts.md) | Deb、RPM、ELF 产物约定与 CI 发布门禁 |
+| [ADR-0001](docs/decisions/0001-bundle-mihomo-as-a-separate-process.md) | 将 Mihomo 作为独立进程随包分发的决策记录 |
+
+## 开发与验证
+
+```bash
+cargo fmt --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo build --release --locked
+```
+
+在原生目标架构上构建并检查全部 Linux 发布格式：
+
+```bash
+rust_arch=$(uname -m)
+deb_arch=$(dpkg --print-architecture)
+./scripts/build-native.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
+./scripts/build-deb.sh --architecture "$deb_arch" --binary target/release/mihomo-tui
+./scripts/build-rpm.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
+./scripts/test-native-binary.sh dist/mihomo-tui-*-linux-"$rust_arch"
+./scripts/test-deb-package.sh dist/*.deb
+./scripts/test-rpm-package.sh dist/*.rpm
+```
+
+完整产物和 CI 约定见[《Linux 发布物》](docs/release-artifacts.md)。
+
+## 安全说明
+
+- 不要在公开问题中粘贴完整配置、API 密钥或订阅地址。
+- 不要把 `secret` 直接写入命令行；优先使用 `MIHOMO_SECRET`。
+- 默认让 Controller 监听 `127.0.0.1`，远程使用时优先选择 HTTPS、专用网络或 SSH 转发。
+- 修改远程服务器的 TUN、路由或 DNS 前，保留第二个 SSH 会话和可用的恢复路径。
+- 下载的 Mihomo 包必须通过大小限制、重定向限制、SHA-256、Deb 元数据和精确版本校验后才会执行。
+
+安全问题请不要附带真实凭据或公开可用的节点信息；在项目提供私密报告渠道之前，先提交不含敏感数据的最小问题描述。
+
+## 参与贡献
+
+欢迎通过 Issue 报告可复现问题，或提交范围清晰的 Pull Request。提交前请：
+
+1. 说明问题、预期行为和影响范围。
+2. 为行为变更添加测试，并保留未知 Mihomo 配置字段。
+3. 运行格式化、测试、Clippy 和 release 构建。
+4. 不在提交、日志、测试夹具或截图中包含真实凭据。
+5. 涉及兼容范围、包布局或自动升级策略时，补充设计依据和回滚证据。
+
+## 许可证
+
+`mihomo-tui` Rust 源码目前**尚未声明项目级许可证**。在维护者补充明确的许可证和版权持有人之前，本仓库默认保留全部权利，公开可见不构成开源授权，也不应发布项目二进制包。
+
+随 Deb/RPM 分发的 Mihomo 是独立项目；其固定许可证文本、源码地址和哈希由 `managed-core.json` 及打包流程单独管理，不会替 `mihomo-tui` 选择许可证。
