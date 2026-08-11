@@ -10,6 +10,10 @@ The Debian bundle is a standalone application distribution: it contains `mihomo-
 official Mihomo binary, the service unit, license/source notices, and the versioned managed-core
 layout. Mihomo remains a separate process rather than being linked into the Rust program.
 
+For installation, first use, service enablement, upgrades, logs, and configuration recovery, see the
+Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installed by the Deb at
+`/usr/share/doc/mihomo-tui/server-guide.md`.
+
 ## Capabilities
 
 - Ratatui dashboard with Status, Proxies, Rules, and Config pages

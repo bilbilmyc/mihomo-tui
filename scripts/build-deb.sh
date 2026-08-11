@@ -212,6 +212,7 @@ install -d -m 755 \
 install -m 755 "$binary" "$package_root/usr/bin/mihomo-tui"
 install -m 755 "$core_binary" "$package_root/usr/lib/mihomo-tui/bundled/$core_tag/mihomo"
 install -m 644 "$repo_root/packaging/debian/mihomo.service" "$package_root/usr/lib/systemd/system/mihomo.service"
+install -m 644 "$repo_root/docs/server-guide.md" "$package_root/usr/share/doc/mihomo-tui/server-guide.md"
 install -m 644 "$license_file" "$package_root/usr/share/doc/mihomo-tui/Mihomo-LICENSE"
 
 source_url="https://github.com/MetaCubeX/mihomo/tree/$core_tag"

@@ -63,10 +63,15 @@ for protected_path in \
 done
 grep -F "ExecStart=/usr/lib/mihomo-tui/current/mihomo -d /etc/mihomo-tui" "$root/usr/lib/systemd/system/mihomo.service" >/dev/null
 grep -F "Source: https://github.com/MetaCubeX/mihomo/tree/$core_tag" "$root/usr/share/doc/mihomo-tui/Mihomo-NOTICE" >/dev/null
+server_guide="$root/usr/share/doc/mihomo-tui/server-guide.md"
+[[ -f $server_guide && ! -L $server_guide ]]
+grep -F 'sudo systemctl enable mihomo.service' "$server_guide" >/dev/null
+grep -F 'sudo mihomo-tui core upgrade' "$server_guide" >/dev/null
+grep -F '配置恢复' "$server_guide" >/dev/null
 actual_license_sha256=$(sha256sum "$root/usr/share/doc/mihomo-tui/Mihomo-LICENSE")
 actual_license_sha256=${actual_license_sha256%% *}
 [[ $actual_license_sha256 == "$license_sha256" ]]
-for document in Mihomo-LICENSE Mihomo-NOTICE copyright; do
+for document in Mihomo-LICENSE Mihomo-NOTICE copyright server-guide.md; do
   [[ $(stat -c '%a' "$root/usr/share/doc/mihomo-tui/$document") == 644 ]]
 done
 
@@ -80,7 +85,11 @@ SYSTEMD_UNIT_PATH="$temp_dir:/usr/lib/systemd/system:/lib/systemd/system" \
   systemd-analyze verify "$verification_unit"
 
 if [[ $(dpkg --print-architecture) == "$architecture" ]]; then
-  "$root/usr/bin/mihomo-tui" --version >/dev/null
+  tui_binary="$root/usr/bin/mihomo-tui"
+  "$tui_binary" --version >/dev/null
+  help_output=$("$tui_binary" -h)
+  grep -F '快速开始' <<<"$help_output" >/dev/null
+  grep -F '/usr/share/doc/mihomo-tui/server-guide.md' <<<"$help_output" >/dev/null
   version_output=$("$bundled_binary" -v)
   core_tag_pattern=${core_tag//./\\.}
   [[ $version_output =~ (^|[[:space:]])$core_tag_pattern([[:space:]]|$) ]]

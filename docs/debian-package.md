@@ -47,6 +47,7 @@ permissions, unit syntax, native executable versions, license hash, source notic
 /usr/lib/systemd/system/mihomo.service
 /usr/share/doc/mihomo-tui/Mihomo-LICENSE
 /usr/share/doc/mihomo-tui/Mihomo-NOTICE
+/usr/share/doc/mihomo-tui/server-guide.md
 /etc/mihomo-tui/config.yaml                    runtime-created native config
 ```
 
