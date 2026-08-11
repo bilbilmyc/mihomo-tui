@@ -1,7 +1,7 @@
 # mihomo-tui Linux 服务器使用手册
 
-本文档说明如何在 Debian/Ubuntu systemd 服务器上安装和使用 `mihomo-tui`。当前支持
-`amd64` 和 `arm64` 原生 Deb 包。
+本文档说明如何在 Linux systemd 服务器上安装和使用 `mihomo-tui`。当前发布物包含
+`x86_64` / `aarch64` 的 Deb、RPM 和原生 ELF 二进制。
 
 ## 1. 运行模式
 
@@ -21,13 +21,28 @@ mihomo-tui core status -h
 mihomo-tui core upgrade -h
 ```
 
-## 2. 安装 Deb
+## 2. 选择并安装发布物
 
-在 Deb 和对应 `.sha256` 文件所在目录中先校验下载结果：
+Deb 适用于 Debian/Ubuntu，RPM 适用于 Fedora/RHEL 系发行版。这两种包都包含经过固定和
+校验的 Mihomo 内核、systemd unit 与本文档。先在下载目录校验对应 SHA-256，再安装：
 
 ```bash
 sha256sum --check mihomo-tui_*.deb.sha256
 sudo apt install ./mihomo-tui_*.deb
+```
+
+```bash
+sha256sum --check mihomo-tui-*.rpm.sha256
+sudo dnf install ./mihomo-tui-*.rpm
+```
+
+原生 ELF 只包含 TUI，不包含 Mihomo 内核和 systemd unit，主要用于连接已运行的外部
+Controller：
+
+```bash
+sha256sum --check mihomo-tui-*-linux-$(uname -m).sha256
+sudo install -m 755 mihomo-tui-*-linux-$(uname -m) /usr/local/bin/mihomo-tui
+MIHOMO_SECRET='your-secret' mihomo-tui --controller http://127.0.0.1:9093
 ```
 
 安装后检查程序和托管内核清单：
@@ -37,7 +52,7 @@ mihomo-tui --version
 mihomo-tui core status
 ```
 
-安装包不会自动启动或启用 `mihomo.service`，也不会覆盖已有的 Mihomo 安装。如果安装器
+Deb/RPM 不会自动启动或启用 `mihomo.service`，也不会覆盖已有的 Mihomo 安装。如果安装器
 报告路径冲突，应先确认旧安装的来源和配置，不要直接删除仍在使用的文件。
 
 ## 3. 首次启动
@@ -137,10 +152,11 @@ mihomo-tui \
 
 ## 7. 升级应用和 Mihomo 内核
 
-安装新 Deb 只注册新的候选内核，不会立即切换当前内核。推荐流程：
+安装新 Deb/RPM 只注册新的候选内核，不会立即切换当前内核。推荐流程：
 
 ```bash
 sudo apt install ./mihomo-tui_NEW_VERSION.deb
+# RPM 系统使用：sudo dnf upgrade ./mihomo-tui_NEW_VERSION.rpm
 mihomo-tui core status
 sudo mihomo-tui core upgrade
 mihomo-tui core status
@@ -222,6 +238,7 @@ sudo systemctl enable --now mihomo.service
 
 ```bash
 sudo apt remove mihomo-tui
+# RPM 系统使用：sudo dnf remove mihomo-tui
 ```
 
 卸载会停止并禁用服务，删除程序、unit 和托管内核。运行时创建的

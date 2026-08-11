@@ -112,9 +112,9 @@ their configuration and credentials are no longer needed.
 ## CI And Publication
 
 Every pull request runs Rust formatting, tests, Clippy, RustSec, bundle policy tests, and native
-amd64/arm64 package builds. Each native runner unpacks the Deb, installs it on the disposable host,
-asserts the service remains disabled and inactive, checks managed layout discovery, simulates package
-payload replacement, verifies active-core preservation, and purges the package.
+amd64/arm64 release builds. Each runner builds Deb, RPM, and raw ELF artifacts. It installs the Deb
+on the disposable runner and the RPM in a Fedora container, checks managed layout discovery,
+simulates package payload replacement, verifies active-core preservation, and removes the package.
 
 The scheduled upstream workflow can update only release/package/license hashes inside the existing
 compatibility range. It pushes a proposal branch, runs the same two-architecture gates, and opens a
@@ -124,7 +124,7 @@ Before publishing artifacts outside CI, maintainers must:
 
 - review the manifest diff and upstream release notes;
 - confirm both architecture jobs and rollback tests passed;
-- verify `.deb` and `.sha256` artifact names and hashes;
+- verify Deb, RPM, native ELF, and `.sha256` artifact names and hashes;
 - retain `Mihomo-LICENSE`, `Mihomo-NOTICE`, and the corresponding source URL;
 - declare the mihomo-tui project's own license and copyright holder;
 - replace the placeholder package maintainer identity with a real contact;

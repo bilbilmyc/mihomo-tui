@@ -47,7 +47,9 @@ src/core_upgrade/       Candidate orchestration, activation, API health checks, 
 src/runtime/            Runtime facade, installation, systemd lifecycle, and tests
 src/mihomo.rs           External Controller API boundary
 packaging/debian/       Unit and maintainer-script templates
-scripts/build-deb.sh    Native standalone bundle builder
+packaging/rpm/          Standard RPM spec template
+scripts/lib/release.sh  Shared manifest, download, ELF, and checksum policy
+scripts/build-*.sh      Native ELF, Deb, and RPM release builders
 docs/managed-core.md    Architecture, security boundaries, and operations
 ```
 
@@ -157,18 +159,19 @@ Never:
 
 ### Bundled Distribution
 
-- Build Debian packages with `dpkg-deb --build --root-owner-group`. The package contains
+- Build Debian packages with `dpkg-deb --build --root-owner-group` and RPM packages with standard
+  `rpmbuild`. Both packages contain
   `mihomo-tui`, the tested official core under `bundled/<version>`, the `mihomo.service` unit,
   license/source notices, and maintainer scripts.
 - On install, `postinst` creates a hard link at `cores/<version>/mihomo` after validating root
   ownership, permissions, and immutable same-version bytes. It creates `current` only when no active
-  link exists. The managed hard link is deliberately not owned by dpkg, so replacing a package
+  link exists. The managed hard link is deliberately not owned by the package manager, so replacing a package
   payload cannot delete the active or rollback core.
 - Installing a newer bundle registers its core but preserves `current`. Activation remains an
   explicit `sudo mihomo-tui core upgrade` transaction.
 - The bundle conflicts with a separately packaged `mihomo` because both would own the same service;
   users must explicitly choose bundled or externally managed mode.
-- Publish SHA-256 checksums for every architecture artifact.
+- Publish SHA-256 checksums for every Deb, RPM, and native ELF architecture artifact.
 - Keep external mode available for users who manage Mihomo separately.
 
 ## Upgrade Transaction

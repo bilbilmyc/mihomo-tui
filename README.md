@@ -6,12 +6,13 @@ The project owns one native Mihomo configuration file. Subscriptions, rules, TUN
 edited while Mihomo is stopped, missing, or unreachable, and the managed Mihomo service reads that
 same file directly.
 
-The Debian bundle is a standalone application distribution: it contains `mihomo-tui`, a reviewed
-official Mihomo binary, the service unit, license/source notices, and the versioned managed-core
-layout. Mihomo remains a separate process rather than being linked into the Rust program.
+The Deb and RPM bundles are standalone application distributions: each contains `mihomo-tui`, a
+reviewed official Mihomo binary, the service unit, license/source notices, and the versioned
+managed-core layout. Mihomo remains a separate process rather than being linked into the Rust
+program. Release builds also provide a directly executable Linux ELF for external-controller use.
 
 For installation, first use, service enablement, upgrades, logs, and configuration recovery, see the
-Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installed by the Deb at
+Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installed by Deb and RPM at
 `/usr/share/doc/mihomo-tui/server-guide.md`.
 
 ## Capabilities
@@ -24,7 +25,7 @@ Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installe
 - Optional Mihomo installation during explicit apply on supported Linux hosts
 - Read-only `mihomo-tui core status` inventory and explicit transactional `core upgrade`
 - Versioned managed cores with atomic activation, API health checks, and automatic rollback
-- Native amd64 and arm64 Debian bundles with SHA-256 checksums
+- Native x86_64 and aarch64 Deb, RPM, and ELF artifacts with SHA-256 checksums
 - Mihomo `/proxies` API discovery and refresh
 - Proxy-group selection through the controller API
 - Reads and edits the single native YAML for rules, providers, TUN, DNS, port, and mode
@@ -35,18 +36,31 @@ Chinese [`Linux server guide`](docs/server-guide.md). The same guide is installe
 - A managed systemd drop-in that points Mihomo directly at `/etc/mihomo-tui`
 - ASCII-compatible UI for SSH terminals without Nerd Fonts
 
-## Standalone Debian Install
+## Linux Release Artifacts
 
-Build and verify a native package on an amd64 or arm64 Debian/Ubuntu host:
+Every supported architecture produces three release formats:
+
+- `mihomo-tui_*_amd64.deb` or `*_arm64.deb`: complete Debian/Ubuntu bundle;
+- `mihomo-tui-*.x86_64.rpm` or `*.aarch64.rpm`: complete RPM/systemd bundle;
+- `mihomo-tui-*-linux-x86_64` or `*-linux-aarch64`: unpackaged TUI executable.
+
+Build and verify all formats on a native x86_64 or aarch64 Debian/Ubuntu build host:
 
 ```bash
-./scripts/build-deb.sh --architecture "$(dpkg --print-architecture)"
+rust_arch=$(uname -m)
+deb_arch=$(dpkg --print-architecture)
+cargo build --release --locked
+./scripts/build-native.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
+./scripts/build-deb.sh --architecture "$deb_arch" --binary target/release/mihomo-tui
+./scripts/build-rpm.sh --architecture "$rust_arch" --binary target/release/mihomo-tui
+./scripts/test-native-binary.sh dist/mihomo-tui-*-linux-"$rust_arch"
 ./scripts/test-deb-package.sh dist/*.deb
+./scripts/test-rpm-package.sh dist/*.rpm
 ```
 
-The builder downloads only the pinned official release from `managed-core.json`, limits artifact
-sizes, verifies SHA-256 and Deb metadata, builds a fresh locked Rust binary, derives shared-library
-dependencies, and emits a `.deb` plus `.sha256`.
+The package builders download only the pinned official release from `managed-core.json`, limit
+artifact sizes, verify SHA-256 and Deb metadata, validate both native ELFs, and emit a checksum next
+to every artifact. `rpmbuild` and `rpm`/`rpm2cpio` are required for the RPM path.
 
 Install the bundle with dependency resolution:
 
@@ -54,6 +68,23 @@ Install the bundle with dependency resolution:
 sudo apt install ./dist/mihomo-tui_*.deb
 mihomo-tui core status
 sudo mihomo-tui
+```
+
+Install the equivalent RPM bundle with:
+
+```bash
+sudo dnf install ./dist/mihomo-tui-*.rpm
+mihomo-tui core status
+sudo mihomo-tui
+```
+
+The unpackaged ELF does not contain Mihomo or a service unit. Verify its checksum, install it under a
+local binary path, and connect it to an existing controller:
+
+```bash
+sha256sum --check mihomo-tui-*-linux-$(uname -m).sha256
+sudo install -m 755 mihomo-tui-*-linux-$(uname -m) /usr/local/bin/mihomo-tui
+MIHOMO_SECRET='your-secret' mihomo-tui --controller http://127.0.0.1:9093
 ```
 
 Installation does not enable or start `mihomo.service`. On a fresh install, the packaged core is
@@ -66,11 +97,12 @@ a managed-core root, or a Mihomo systemd unit/drop-in in the paths owned by the 
 conflicting local installation first, or keep it and run the standalone TUI in external-controller
 mode. Package upgrades skip this fresh-install guard and preserve the selected managed core.
 
-For a paired package/core update, install the reviewed new Deb first, inspect both versions, then
+For a paired package/core update, install the reviewed new Deb or RPM first, inspect both versions, then
 activate explicitly:
 
 ```bash
 sudo apt install ./mihomo-tui_NEW_VERSION.deb
+# RPM hosts: sudo dnf upgrade ./mihomo-tui_NEW_VERSION.rpm
 mihomo-tui core status
 sudo mihomo-tui core upgrade
 ```
@@ -79,8 +111,8 @@ Package upgrade registers the new core but preserves the active core and rollbac
 explicit upgrade validates the already installed candidate, atomically switches `current`, restarts
 Mihomo, checks `/version` and `/proxies`, and restores the previous core if activation fails.
 
-See [`docs/debian-package.md`](docs/debian-package.md) for packaging, removal, publication, and
-license gates.
+See [`docs/release-artifacts.md`](docs/release-artifacts.md) for artifact contracts and CI, and
+[`docs/debian-package.md`](docs/debian-package.md) for managed package lifecycle and license gates.
 
 ## Run From Source
 
