@@ -1,0 +1,152 @@
+Name:           mihomo-tui
+Version:        @APP_VERSION@
+Release:        1.mihomo@CORE_VERSION@
+Summary:        SSH-friendly terminal control center with a pinned Mihomo core
+License:        LicenseRef-Undeclared AND GPL-3.0-only
+BuildArch:      @RPM_ARCH@
+Source0:        mihomo-tui
+Source1:        mihomo
+Source2:        mihomo.service
+Source3:        server-guide.md
+Source4:        Mihomo-LICENSE
+Source5:        Mihomo-NOTICE
+Requires:       ca-certificates
+Requires:       systemd
+Recommends:     iproute
+Conflicts:      mihomo
+
+%description
+Ships mihomo-tui and the reviewed official Mihomo @CORE_TAG@ core in a
+versioned layout. Installation does not automatically start the service.
+
+%prep
+
+%build
+
+%install
+install -d \
+  %{buildroot}%{_bindir} \
+  %{buildroot}%{_prefix}/lib/mihomo-tui/bundled/@CORE_TAG@ \
+  %{buildroot}%{_prefix}/lib/systemd/system \
+  %{buildroot}%{_docdir}/mihomo-tui \
+  %{buildroot}%{_sysconfdir}/mihomo-tui
+install -m 755 %{SOURCE0} %{buildroot}%{_bindir}/mihomo-tui
+install -m 755 %{SOURCE1} %{buildroot}%{_prefix}/lib/mihomo-tui/bundled/@CORE_TAG@/mihomo
+install -m 644 %{SOURCE2} %{buildroot}%{_prefix}/lib/systemd/system/mihomo.service
+install -m 644 %{SOURCE3} %{buildroot}%{_docdir}/mihomo-tui/server-guide.md
+install -m 644 %{SOURCE4} %{buildroot}%{_docdir}/mihomo-tui/Mihomo-LICENSE
+install -m 644 %{SOURCE5} %{buildroot}%{_docdir}/mihomo-tui/Mihomo-NOTICE
+
+%pre
+if [ "$1" -eq 1 ]; then
+  for path in \
+    /usr/bin/mihomo \
+    /usr/local/bin/mihomo \
+    /usr/bin/mihomo-tui \
+    /usr/local/bin/mihomo-tui \
+    /usr/lib/mihomo-tui \
+    /etc/systemd/system/mihomo.service \
+    /etc/systemd/system/mihomo.service.d \
+    /etc/systemd/system/multi-user.target.wants/mihomo.service \
+    /run/systemd/system/mihomo.service \
+    /run/systemd/system/mihomo.service.d \
+    /usr/lib/systemd/system/mihomo.service \
+    /lib/systemd/system/mihomo.service; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      echo "mihomo-tui: refusing to replace unmanaged host path: $path" >&2
+      echo "remove the conflicting local installation or use external-controller mode" >&2
+      exit 1
+    fi
+  done
+fi
+
+%post
+default_core='@CORE_TAG@'
+managed_root=/usr/lib/mihomo-tui
+bundled_root=$managed_root/bundled
+bundled_version_root=$bundled_root/$default_core
+bundled_core=$bundled_version_root/mihomo
+cores_root=$managed_root/cores
+version_root=$cores_root/$default_core
+managed_core=$version_root/mihomo
+current=$managed_root/current
+
+safe_mode() {
+  mode=$(stat -c '%%a' "$1") || return 1
+  [ $((0$mode & 022)) -eq 0 ]
+}
+trusted_directory() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%%u' "$1")" = 0 ] && safe_mode "$1"
+}
+trusted_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%%u' "$1")" = 0 ] && safe_mode "$1"
+}
+
+for directory in "$managed_root" "$bundled_root" "$bundled_version_root"; do
+  trusted_directory "$directory" || {
+    echo "mihomo-tui: bundled core directory is unsafe: $directory" >&2
+    exit 1
+  }
+done
+trusted_file "$bundled_core" || {
+  echo "mihomo-tui: bundled core is not a trusted root file" >&2
+  exit 1
+}
+for directory in "$cores_root" "$version_root"; do
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    trusted_directory "$directory" || {
+      echo "mihomo-tui: managed core directory is unsafe: $directory" >&2
+      exit 1
+    }
+  else
+    install -d -m 755 "$directory"
+  fi
+done
+if [ -e "$managed_core" ] || [ -L "$managed_core" ]; then
+  if ! trusted_file "$managed_core" || ! cmp -s "$bundled_core" "$managed_core"; then
+    echo "mihomo-tui: existing managed core differs from bundled $default_core" >&2
+    exit 1
+  fi
+else
+  ln "$bundled_core" "$managed_core"
+fi
+if [ ! -e "$current" ] && [ ! -L "$current" ]; then
+  ln -s "cores/$default_core" "$current"
+elif [ ! -L "$current" ]; then
+  echo "mihomo-tui: managed current path is not a symbolic link" >&2
+  exit 1
+fi
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+%preun
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now mihomo.service || true
+fi
+
+%postun
+if [ "$1" -eq 0 ]; then
+  if [ -L /usr/lib/mihomo-tui/current ]; then
+    rm -f /usr/lib/mihomo-tui/current
+  fi
+  if [ -d /usr/lib/mihomo-tui/cores ] && [ ! -L /usr/lib/mihomo-tui/cores ]; then
+    rm -rf -- /usr/lib/mihomo-tui/cores
+  fi
+  if [ -d /usr/lib/mihomo-tui/bundled ] && [ ! -L /usr/lib/mihomo-tui/bundled ]; then
+    rm -rf -- /usr/lib/mihomo-tui/bundled
+  fi
+  rmdir /usr/lib/mihomo-tui 2>/dev/null || true
+fi
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+%files
+%dir %attr(0755,root,root) %{_sysconfdir}/mihomo-tui
+%{_bindir}/mihomo-tui
+%{_prefix}/lib/mihomo-tui/bundled/@CORE_TAG@/mihomo
+%{_prefix}/lib/systemd/system/mihomo.service
+%doc %{_docdir}/mihomo-tui/server-guide.md
+%doc %{_docdir}/mihomo-tui/Mihomo-NOTICE
+%license %{_docdir}/mihomo-tui/Mihomo-LICENSE
