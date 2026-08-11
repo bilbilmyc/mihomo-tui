@@ -320,7 +320,14 @@ mod tests {
             .and_then(|jobs| jobs.as_mapping())
             .unwrap();
 
-        for job in ["quality", "security-audit", "packages", "draft-release"] {
+        for job in [
+            "quality",
+            "security-audit",
+            "packages",
+            "prepare-draft-release",
+            "release-packages",
+            "verify-draft-release",
+        ] {
             assert!(
                 jobs.contains_key(serde_yaml::Value::from(job)),
                 "CI is missing the {job} job"
@@ -333,9 +340,16 @@ mod tests {
             "refs/tags/v",
             "--draft",
             "refusing to replace assets on a published release",
-            "merge-multiple: true",
+            "gh release upload",
+            "sha256sum --check -- *.sha256",
         ] {
             assert!(workflow.contains(required), "CI is missing {required}");
+        }
+        for forbidden in ["actions/upload-artifact@", "actions/download-artifact@"] {
+            assert!(
+                !workflow.contains(forbidden),
+                "CI must not depend on quota-limited {forbidden}"
+            );
         }
 
         let package_action = include_str!("../.github/actions/build-linux-packages/action.yml");

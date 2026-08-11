@@ -84,7 +84,6 @@ jobs:
         with:
           rust-architecture: ${{ matrix.architecture }}
           debian-architecture: ${{ matrix.debian }}
-          upload-artifact: "false"
 
   open-pr:
     needs: [prepare, verify]

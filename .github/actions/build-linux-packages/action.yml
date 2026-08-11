@@ -8,10 +8,6 @@ inputs:
   debian-architecture:
     description: Debian architecture
     required: true
-  upload-artifact:
-    description: Upload the dist directory after verification
-    required: false
-    default: "true"
 
 runs:
   using: composite
@@ -65,12 +61,3 @@ runs:
           --workdir /work \
           fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814 \
           bash -lc 'dnf install -y jq && ./scripts/test-install-rpm.sh dist/*.rpm'
-
-    - name: Upload release artifacts
-      if: inputs.upload-artifact == 'true'
-      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-      with:
-        name: mihomo-tui-linux-${{ inputs.rust-architecture }}
-        path: dist/*
-        if-no-files-found: error
-        retention-days: 14

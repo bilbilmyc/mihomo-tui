@@ -59,12 +59,15 @@ docker run --rm \
 Every pull request and branch push runs formatting, Rust tests, Clippy, RustSec, release policy tests,
 and both native architecture package jobs. The package jobs build and inspect all formats, install
 the Deb on the disposable runner, install the RPM in Fedora, exercise reinstall preservation, and
-upload the verified files as 14-day workflow artifacts.
+discard the local build directory when verification finishes. This keeps routine CI independent of
+the repository owner's quota for temporary Actions artifacts.
 
-A tag must exactly match the Cargo version, for example `v0.1.0`. Only after all quality, security,
-and package jobs pass does CI create or update a draft GitHub Release containing all 12 files. A
-maintainer must review and publish that draft. Rerunning the workflow replaces existing draft assets
-instead of creating duplicate releases.
+A tag must exactly match the Cargo version, for example `v0.1.0`. After the quality and security
+gates pass, CI creates or reuses a draft GitHub Release. The x86_64 and aarch64 jobs then build and
+verify the packages natively and upload their files directly to that draft. A final job downloads all
+12 files and verifies every checksum. A maintainer must review and publish the draft. Rerunning the
+workflow replaces matching draft assets instead of creating duplicate releases. CI refuses to
+modify a release that has already been published.
 
 The weekly managed-core proposal workflow uses the same package action. An upstream version change
 therefore cannot open a pull request unless Deb, RPM, native binary, and disposable installation
@@ -72,7 +75,7 @@ checks all pass on both architectures.
 
 ## Publication Gate
 
-CI produces private workflow artifacts and draft releases, but public publication still requires:
+CI produces verified draft releases for version tags, but public publication still requires:
 
 - a declared license and copyright holder for the mihomo-tui Rust project;
 - a real Deb/RPM maintainer contact instead of the current placeholder;
