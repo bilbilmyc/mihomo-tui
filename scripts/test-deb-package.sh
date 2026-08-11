@@ -25,6 +25,7 @@ core_tag=$(jq -er '.recommended' "$manifest")
 license_sha256=$(jq -er '.license.sha256' "$manifest")
 [[ $(dpkg-deb --field "$package" Package) == mihomo-tui ]]
 [[ $(dpkg-deb --field "$package" Conflicts) == mihomo ]]
+[[ $(dpkg-deb --field "$package" Maintainer) == 'bilbilmyc <1361998242@qq.com>' ]]
 [[ $architecture == amd64 || $architecture == arm64 ]]
 depends=$(dpkg-deb --field "$package" Depends)
 grep -Eq '(^|, )libc6( \([^)]*\))?(,|$)' <<<"$depends"

@@ -96,7 +96,7 @@ sudo apt remove mihomo-tui
 - 确认两个架构任务和回滚测试都已通过；
 - 校验 Deb、RPM、原生 ELF 与 `.sha256` 的文件名和哈希；
 - 保留 `mihomo-tui-LICENSE`、`Mihomo-LICENSE`、`Mihomo-NOTICE` 和对应源码 URL；
-- 用真实联系方式替换软件包维护者占位信息；
+- 确认软件包维护者联系方式仍然有效；
 - 要求人工批准配套 Release。
 
 `mihomo-tui` 采用 MIT License；Mihomo 载荷单独记录为 GPL-3.0，并固定许可证哈希。Deb 会同时携带两份许可证及 Mihomo 源码声明。

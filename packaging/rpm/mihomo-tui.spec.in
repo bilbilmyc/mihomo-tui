@@ -3,6 +3,7 @@ Version:        @APP_VERSION@
 Release:        1.mihomo@CORE_VERSION@
 Summary:        SSH-friendly terminal control center with a pinned Mihomo core
 License:        MIT AND GPL-3.0-only
+Packager:       bilbilmyc <1361998242@qq.com>
 BuildArch:      @RPM_ARCH@
 Source0:        mihomo-tui
 Source1:        mihomo

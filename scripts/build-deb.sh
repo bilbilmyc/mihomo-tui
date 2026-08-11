@@ -55,7 +55,7 @@ install -D -m 755 "$RELEASE_BINARY" "$shlibs_workspace/debian/mihomo-tui/usr/bin
   echo "Source: mihomo-tui"
   echo "Section: net"
   echo "Priority: optional"
-  echo "Maintainer: mihomo-tui maintainers"
+  echo "Maintainer: bilbilmyc <1361998242@qq.com>"
   echo
   echo "Package: mihomo-tui"
   echo "Architecture: any"
@@ -97,7 +97,7 @@ installed_size=$(du -sk "$package_root/usr" "$package_root/etc" | awk '{ total +
   echo "Package: mihomo-tui"
   echo "Version: $package_version"
   echo "Architecture: $RELEASE_DEB_ARCH"
-  echo "Maintainer: mihomo-tui maintainers"
+  echo "Maintainer: bilbilmyc <1361998242@qq.com>"
   echo "Section: net"
   echo "Priority: optional"
   echo "Installed-Size: $installed_size"

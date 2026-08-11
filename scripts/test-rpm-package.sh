@@ -26,6 +26,7 @@ license_sha256=$(jq -er '.license.sha256' "$manifest")
 [[ $(rpm -qp --queryformat '%{NAME}' "$package") == mihomo-tui ]]
 [[ $(rpm -qp --queryformat '%{CONFLICTNAME}' "$package") == mihomo ]]
 [[ $(rpm -qp --queryformat '%{LICENSE}' "$package") == 'MIT AND GPL-3.0-only' ]]
+[[ $(rpm -qp --queryformat '%{PACKAGER}' "$package") == 'bilbilmyc <1361998242@qq.com>' ]]
 architecture=$(rpm -qp --queryformat '%{ARCH}' "$package")
 [[ $architecture == x86_64 || $architecture == aarch64 ]]
 requires=$(rpm -qp --requires "$package")
