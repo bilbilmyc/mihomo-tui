@@ -21,35 +21,67 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{fmt::Display, io::stdout, path::PathBuf, process::ExitCode};
 
+const TOP_LEVEL_AFTER_HELP: &str = r#"快速开始:
+  sudo mihomo-tui
+      使用 /etc/mihomo-tui/config.yaml 启动本机管理界面。
+      在界面中完成配置后按 p 校验并启动或重载 Mihomo。
+
+  mihomo-tui --controller http://127.0.0.1:9093
+      只连接已有 Mihomo Controller，不安装或管理本机 systemd 服务。
+
+常用内核命令:
+  mihomo-tui core status          查看当前、已安装、推荐及兼容版本
+  sudo mihomo-tui core upgrade   显式升级托管内核，失败时自动回滚
+
+完整服务器说明:
+  /usr/share/doc/mihomo-tui/server-guide.md
+  源码仓库中的 docs/server-guide.md"#;
+
+const CORE_AFTER_HELP: &str = r#"使用示例:
+  mihomo-tui core status
+      只读检查托管内核状态，不修改系统。
+
+  sudo mihomo-tui core upgrade
+      校验候选内核和配置，切换后执行健康检查，失败时自动回滚。"#;
+
+const CORE_STATUS_AFTER_HELP: &str = r#"该命令是只读操作，不会下载、切换、启动或重载 Mihomo。"#;
+
+const CORE_UPGRADE_AFTER_HELP: &str = r#"升级要求 root 权限、受信任的托管配置和已安装的 mihomo.service。
+升级是显式事务：候选校验 -> 原子切换 -> 服务重启 -> API 健康检查；失败时自动回滚。"#;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mihomo-tui",
     version,
-    about = "A terminal control center for Mihomo"
+    about = "通过 SSH 管理 Mihomo 的终端控制中心",
+    long_about = "mihomo-tui 是面向 Linux 服务器的 Mihomo 终端控制中心。\n不带子命令时启动 TUI；也可以只连接已有 Controller，或显式检查和升级托管内核。",
+    after_help = TOP_LEVEL_AFTER_HELP,
+    next_line_help = true
 )]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Mihomo external controller URL, for example http://127.0.0.1:9093
+    /// 外部 Mihomo Controller 地址，例如 http://127.0.0.1:9093。
     #[arg(long, env = "MIHOMO_CONTROLLER")]
     controller: Option<String>,
-    /// Mihomo API secret. Prefer MIHOMO_SECRET in shell environments.
+    /// Mihomo API 密钥；在 shell 中优先使用 MIHOMO_SECRET。
     #[arg(long, env = "MIHOMO_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// Legacy Mihomo config imported only when the owned config does not exist.
+    /// 仅在独立配置不存在时导入的旧 Mihomo 配置。
     #[arg(long, env = "MIHOMO_CONFIG")]
     config: Option<PathBuf>,
-    /// Single native configuration owned by mihomo-tui.
+    /// mihomo-tui 管理的单一原生配置路径。
     #[arg(long, env = "MIHOMO_TUI_CONFIG")]
     workspace: Option<PathBuf>,
-    /// Do not download Mihomo when reloading the managed core.
+    /// 应用配置时不自动下载缺失的 Mihomo。
     #[arg(long)]
     no_auto_install: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect or explicitly upgrade the managed Mihomo core.
+    /// 检查或显式升级托管 Mihomo 内核。
+    #[command(after_help = CORE_AFTER_HELP)]
     Core {
         #[command(subcommand)]
         command: CoreCommand,
@@ -58,9 +90,11 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum CoreCommand {
-    /// Report installed, active, recommended, and compatible core versions.
+    /// 查看已安装、当前、推荐及兼容的内核版本。
+    #[command(after_help = CORE_STATUS_AFTER_HELP)]
     Status,
-    /// Explicitly stage, activate, health-check, and roll back a core update.
+    /// 显式暂存、激活并健康检查内核更新，失败时回滚。
+    #[command(after_help = CORE_UPGRADE_AFTER_HELP)]
     Upgrade,
 }
 
@@ -221,6 +255,40 @@ mod tests {
                 command: CoreCommand::Upgrade
             })
         ));
+    }
+
+    #[test]
+    fn top_level_help_explains_the_server_quick_start_and_modes() {
+        let error = Args::try_parse_from(["mihomo-tui", "-h"]).unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        for expected in [
+            "快速开始",
+            "sudo mihomo-tui",
+            "/etc/mihomo-tui/config.yaml",
+            "--controller",
+            "/usr/share/doc/mihomo-tui/server-guide.md",
+        ] {
+            assert!(
+                help.contains(expected),
+                "help is missing {expected:?}:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_help_explains_inspection_and_transactional_upgrade() {
+        let error = Args::try_parse_from(["mihomo-tui", "core", "-h"]).unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        for expected in ["core status", "core upgrade", "健康检查", "自动回滚"] {
+            assert!(
+                help.contains(expected),
+                "help is missing {expected:?}:\n{help}"
+            );
+        }
     }
 
     #[test]
