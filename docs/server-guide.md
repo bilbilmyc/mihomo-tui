@@ -75,7 +75,7 @@ sudo mihomo-tui
 - 配置页 `a`：添加 HTTP 订阅；`e`：修改所选订阅地址；`r`：更新订阅。
 - 状态页 `t` / `d`：编辑 TUN / DNS 设置。
 - 规则页 `a` / `A`：在顶部 / 底部添加规则；`e`：编辑；`s`：保存规则。
-- `p`：校验当前配置并启动或重载本机 Mihomo。
+- `p`：校验当前配置并启动或重启本机 Mihomo。
 - `q`、`Esc` 或 `Ctrl-C`：退出。
 
 保存订阅、规则、TUN 或 DNS 只会修改配置文件。必须按 `p`，运行中的 Mihomo 才会加载
@@ -84,7 +84,8 @@ sudo mihomo-tui
 ## 4. 应用配置并启用开机启动
 
 在 TUI 中按 `p` 后，程序会检查受支持的内核版本、用 Mihomo 校验配置、安装受管理的
-systemd drop-in，然后执行 `systemctl reload-or-restart mihomo.service`。
+systemd drop-in，然后执行 `systemctl restart mihomo.service`，以确保更新后的启动参数和配置
+都生效。
 
 只有 TUI 明确报告应用成功后，才执行：
 

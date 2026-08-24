@@ -172,7 +172,7 @@ dns:
     }
 
     #[test]
-    fn saves_and_reloads_tun_and_dns_settings_offline() {
+    fn switches_tun_stack_and_reloads_network_settings_offline() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -197,9 +197,9 @@ rules:
 "#,
         )
         .unwrap();
-        let tun = super::TunSettings {
+        let system_tun = super::TunSettings {
             enable: false,
-            stack: "mixed".into(),
+            stack: "system".into(),
             device: Some("Mihomo".into()),
             auto_route: true,
             auto_redirect: true,
@@ -221,13 +221,21 @@ rules:
             respect_rules: false,
         };
 
-        let tun_backup = super::save_tun_settings(&path, &tun).unwrap();
+        let system_tun_backup = super::save_tun_settings(&path, &system_tun).unwrap();
+        assert_eq!(super::load(&path).unwrap().tun, system_tun);
+
+        let mixed_tun = super::TunSettings {
+            stack: "mixed".into(),
+            ..system_tun.clone()
+        };
+        let mixed_tun_backup = super::save_tun_settings(&path, &mixed_tun).unwrap();
         let dns_backup = super::save_dns_settings(&path, &dns).unwrap();
         let snapshot = super::load(&path).unwrap();
 
-        assert_eq!(snapshot.tun, tun);
+        assert_eq!(snapshot.tun, mixed_tun);
         assert_eq!(snapshot.dns, dns);
-        fs::remove_file(tun_backup).unwrap();
+        fs::remove_file(system_tun_backup).unwrap();
+        fs::remove_file(mixed_tun_backup).unwrap();
         fs::remove_file(dns_backup).unwrap();
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();

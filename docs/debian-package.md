@@ -58,7 +58,7 @@ mihomo-tui core status
 sudo mihomo-tui
 ```
 
-systemd 运行时，软件包安装会执行 `systemctl daemon-reload`，但不会启用或启动 `mihomo.service`。在干净主机上，由于不存在 `current` 链接，`postinst` 会选择随包版本。运行 TUI 会初始化 `/etc/mihomo-tui/config.yaml`；按 `p` 才会显式校验配置并启动或重载服务。
+systemd 运行时，软件包安装会执行 `systemctl daemon-reload`，但不会启用或启动 `mihomo.service`。在干净主机上，由于不存在 `current` 链接，`postinst` 会选择随包版本。运行 TUI 会初始化 `/etc/mihomo-tui/config.yaml`；按 `p` 才会显式校验配置并启动或重启服务。
 
 全新安装解包前，`preinst` 会检查 `/etc`、`/run`、`/usr/lib` 和 `/lib` 下的常见路径，并拒绝已有的 Mihomo 或 `mihomo-tui` 二进制、托管内核根目录、Mihomo unit、drop-in 或启用链接。这样可防止软件包接管未受管的现有安装。软件包升级时这些路径本来就归本包所有，因此不会执行该防护检查。
 

@@ -59,10 +59,10 @@ profile:
 2. 要求现有内核位于 `managed-core.json` 内嵌的兼容范围。全新主机安装必须与清单中的推荐版本及包元数据完全一致。
 3. 使用受信任的 Mihomo 可执行文件校验 `/etc/mihomo-tui/config.yaml`。
 4. 安装 root 所有的 systemd drop-in，把 Mihomo 数据目录设为 `/etc/mihomo-tui`。
-5. 重新加载 systemd，并执行 `systemctl reload-or-restart mihomo.service`。
+5. 重新加载 systemd，并执行 `systemctl restart mihomo.service`。
 6. 刷新已配置的 HTTP provider，并验证其能够返回节点。
 
-校验失败时，已保存的配置仍可继续修正，服务不会重载。受管 drop-in 是唯一支持的覆盖配置；程序会拒绝未知的服务 drop-in，而不是覆盖它们。
+校验失败时，已保存的配置仍可继续修正，服务不会重启。受管 drop-in 是唯一支持的覆盖配置；程序会拒绝未知的服务 drop-in，而不是覆盖它们。
 
 启动和应用都不会升级现有内核。新的 Mihomo 上游版本必须先加入经过审查的清单，并通过 `docs/managed-core.md` 说明的托管内核发布检查。
 

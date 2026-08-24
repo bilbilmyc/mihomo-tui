@@ -47,7 +47,7 @@ mihomo-tui core status
 sudo mihomo-tui
 ```
 
-首次进入 TUI 后完成配置，按 `p` 校验配置并启动或重载 Mihomo。软件包安装本身不会启用或启动 `mihomo.service`；确认首次应用成功后，如需开机启动，再执行：
+首次进入 TUI 后完成配置，按 `p` 校验配置并启动或重启 Mihomo。软件包安装本身不会启用或启动 `mihomo.service`；确认首次应用成功后，如需开机启动，再执行：
 
 ```bash
 sudo systemctl enable mihomo.service
@@ -121,7 +121,7 @@ cargo run -- \
 sudo mihomo-tui
 ```
 
-启动只打开并编辑配置，不会自动升级内核。按 `p` 才会校验配置、配置受管 systemd drop-in，并执行 `reload-or-restart`。
+启动只打开并编辑配置，不会自动升级内核。按 `p` 才会校验配置、配置受管 systemd drop-in，并重启服务，使更新后的 `ExecStart` 和唯一配置同时生效。
 
 ### 外部 Controller 模式
 
@@ -155,7 +155,7 @@ MIHOMO_SECRET='你的密钥' \
 | `Enter` | 应用选中的代理节点 |
 | `l` | 测试选中节点的延迟 |
 | `r` | 刷新 Mihomo 数据；配置页优先更新选中的 HTTP 订阅 |
-| `p` | 校验当前配置并启动或重载受管 Mihomo |
+| `p` | 校验当前配置并启动或重启受管 Mihomo |
 | `t` / `d` | 从状态页打开 TUN / DNS 高级设置 |
 | `a` / `A` | 添加订阅，或在规则列表顶部 / 底部添加规则 |
 | `e` | 编辑选中的订阅或规则 |

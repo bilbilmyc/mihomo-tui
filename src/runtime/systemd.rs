@@ -46,8 +46,8 @@ pub fn reload_service() -> Result<(), String> {
 
 pub(super) fn config_apply_command() -> (&'static str, [&'static str; 2]) {
     (
-        "systemctl reload-or-restart mihomo.service",
-        ["reload-or-restart", "mihomo.service"],
+        "systemctl restart mihomo.service",
+        ["restart", "mihomo.service"],
     )
 }
 

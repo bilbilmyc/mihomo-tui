@@ -113,11 +113,11 @@ fn partial_install_is_not_overwritten() {
 }
 
 #[test]
-fn applying_an_edited_config_starts_an_inactive_service() {
+fn applying_an_edited_config_restarts_the_service_to_apply_exec_start() {
     let (description, arguments) = config_apply_command();
 
-    assert_eq!(description, "systemctl reload-or-restart mihomo.service");
-    assert_eq!(arguments, ["reload-or-restart", "mihomo.service"]);
+    assert_eq!(description, "systemctl restart mihomo.service");
+    assert_eq!(arguments, ["restart", "mihomo.service"]);
 }
 
 #[test]

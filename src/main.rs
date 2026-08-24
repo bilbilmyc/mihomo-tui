@@ -29,7 +29,7 @@ const LEAF_HELP_TEMPLATE: &str =
 const TOP_LEVEL_AFTER_HELP: &str = r#"快速开始：
   sudo mihomo-tui
       使用 /etc/mihomo-tui/config.yaml 启动本机管理界面。
-      在界面中完成配置后按 p 校验并启动或重载 Mihomo。
+      在界面中完成配置后按 p 校验并启动或重启 Mihomo。
 
   mihomo-tui --controller http://127.0.0.1:9093
       只连接已有 Mihomo Controller，不安装或管理本机 systemd 服务。
@@ -49,7 +49,7 @@ const CORE_AFTER_HELP: &str = r#"使用示例：
   sudo mihomo-tui core upgrade
       校验候选内核和配置，切换后执行健康检查，失败时自动回滚。"#;
 
-const CORE_STATUS_AFTER_HELP: &str = r#"该命令是只读操作，不会下载、切换、启动或重载 Mihomo。"#;
+const CORE_STATUS_AFTER_HELP: &str = r#"该命令是只读操作，不会下载、切换、启动或重启 Mihomo。"#;
 
 const CORE_UPGRADE_AFTER_HELP: &str = r#"升级要求 root 权限、受信任的托管配置和已安装的 mihomo.service。
 升级是显式事务：候选校验 -> 原子切换 -> 服务重启 -> API 健康检查；失败时自动回滚。"#;

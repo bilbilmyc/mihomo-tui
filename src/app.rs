@@ -359,7 +359,7 @@ impl App {
                         Ok(proxies) => apply_proxy_refresh(&mut self.state, proxies),
                         Err(error) => {
                             self.state.status = if self.reload_pending {
-                                format!("API 错误：{error}；配置已保存，核心待重载（按 p）")
+                                format!("API 错误：{error}；配置已保存，核心待重启（按 p）")
                             } else {
                                 format!("API 错误：{error}")
                             }
@@ -418,10 +418,10 @@ impl App {
                                 }
                                 ProviderRefreshContext::AfterApply => {
                                     if data.node_count == 0 {
-                                        format!("核心已重载，但 {name} 未返回节点")
+                                        format!("核心已重启，但 {name} 未返回节点")
                                     } else {
                                         format!(
-                                            "核心已重载；{name} 获取 {} 个节点",
+                                            "核心已重启；{name} 获取 {} 个节点",
                                             data.node_count
                                         )
                                     }
@@ -438,7 +438,7 @@ impl App {
                             }
                             ProviderRefreshContext::AfterApply => {
                                 self.state.status =
-                                    format!("核心已重载，但 {name} 订阅验证失败：{error}")
+                                    format!("核心已重启，但 {name} 订阅验证失败：{error}")
                             }
                         },
                     }
@@ -456,13 +456,13 @@ impl App {
                                 .map(|provider| provider.name.clone())
                                 .collect::<Vec<_>>();
                             if providers.is_empty() {
-                                self.state.status = "唯一配置已校验，Mihomo 核心已重载".into();
+                                self.state.status = "唯一配置已校验，Mihomo 核心已重启".into();
                             } else if self.client.is_none() {
                                 self.state.status =
-                                    "核心已重载，但未连接控制器，无法验证订阅".into();
+                                    "核心已重启，但未连接控制器，无法验证订阅".into();
                             } else {
                                 self.state.status =
-                                    format!("核心已重载，正在验证 {} 个订阅...", providers.len());
+                                    format!("核心已重启，正在验证 {} 个订阅...", providers.len());
                                 for name in providers {
                                     self.start_provider_refresh(
                                         name,
@@ -888,9 +888,9 @@ impl App {
 
     fn reload_hint(&self) -> &'static str {
         if self.config_reload == ConfigReload::LocalSystemd {
-            "；按 p 重载核心"
+            "；按 p 重启核心"
         } else {
-            "；外部核心需自行重载"
+            "；外部核心需自行重启"
         }
     }
 
@@ -916,11 +916,11 @@ impl App {
             return;
         }
         if self.config_reload != ConfigReload::LocalSystemd {
-            self.state.status = "本地重载不可用：当前只连接外部控制器，唯一配置仍可离线编辑".into();
+            self.state.status = "本地重启不可用：当前只连接外部控制器，唯一配置仍可离线编辑".into();
             return;
         }
         let Some(source) = self.config_path.clone() else {
-            self.state.status = "本地重载不可用：未发现唯一配置路径".into();
+            self.state.status = "本地重启不可用：未发现唯一配置路径".into();
             return;
         };
         if !self.reload_pending {
@@ -928,7 +928,7 @@ impl App {
             return;
         }
         self.apply_in_flight = true;
-        self.state.status = "正在校验唯一配置并重载核心...".into();
+        self.state.status = "正在校验唯一配置并重启核心...".into();
         let sender = self.worker_tx.clone();
         let auto_install = self.auto_install;
         thread::spawn(move || {
@@ -1095,11 +1095,11 @@ impl App {
             };
         }
         match (self.state.page, self.proxy_members_focused) {
-            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  p 重载核心  r 刷新  q 退出",
-            (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重载核心  r 刷新  q 退出",
-            (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重载核心  Left 返回",
-            (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重载",
-            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  p 重载",
+            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  p 重启核心  r 刷新  q 退出",
+            (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重启核心  r 刷新  q 退出",
+            (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重启核心  Left 返回",
+            (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
+            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  p 重启",
         }
     }
 
@@ -1119,7 +1119,7 @@ impl App {
                 if self.config_reload == ConfigReload::None {
                     "外部管理"
                 } else if self.reload_pending {
-                    "待重载（按 p）"
+                    "待重启（按 p）"
                 } else {
                     "已加载当前配置"
                 }
@@ -1345,7 +1345,7 @@ impl App {
             return;
         }
         if self.reload_pending {
-            self.state.status = "配置已保存；请先按 p 重载核心，再更新订阅".into();
+            self.state.status = "配置已保存；请先按 p 重启核心，再更新订阅".into();
             return;
         }
         let Some(provider) = self.config.providers.get(self.state.selected) else {
@@ -1905,7 +1905,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&imported).unwrap(), imported_before);
         assert!(app.reload_pending);
         assert!(app.state.status.contains("已保存到唯一配置"));
-        assert!(app.state.status.contains("重载核心"));
+        assert!(app.state.status.contains("重启核心"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1923,7 +1923,7 @@ mod tests {
         assert!(screen.contains("唯一配置"), "{screen}");
         assert!(!screen.contains("运行配置"), "{screen}");
         assert!(screen.contains("核心加载"), "{screen}");
-        assert!(screen.contains("待重载"), "{screen}");
+        assert!(screen.contains("待重启"), "{screen}");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1964,7 +1964,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
         assert_eq!(app.provider_refresh_in_flight, 0);
-        assert!(app.state.status.contains("先按 p 重载核心"));
+        assert!(app.state.status.contains("先按 p 重启核心"));
     }
 
     #[test]
@@ -2132,7 +2132,7 @@ mod tests {
 
         assert!(app.add_provider.is_none());
         assert!(app.state.status.contains("已保存到唯一配置"));
-        assert!(app.state.status.contains("外部核心需自行重载"));
+        assert!(app.state.status.contains("外部核心需自行重启"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2165,7 +2165,7 @@ mod tests {
         }
 
         assert!(app.add_provider.is_none());
-        assert!(app.state.status.contains("核心已重载"));
+        assert!(app.state.status.contains("核心已重启"));
         assert!(app.state.status.contains("获取 2 个节点"));
         assert_eq!(app.state.proxies[0].name, "Main");
         assert_eq!(server.join().unwrap(), 3);
@@ -2200,7 +2200,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(app.state.status.contains("核心已重载"));
+        assert!(app.state.status.contains("核心已重启"));
         assert!(app.state.status.contains("订阅验证失败"));
         server.join().unwrap();
         fs::remove_dir_all(directory).unwrap();
