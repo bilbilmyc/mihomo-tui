@@ -19,6 +19,7 @@ pub struct App {
     client: Option<MihomoClient>,
     last_refresh: Instant,
     connections_view: crate::observability::ConnectionsView,
+    diagnostics_view: crate::diagnostics::View,
     last_connections_refresh: Instant,
     proxy_members_focused: bool,
     selected_proxy_member_index: usize,
@@ -238,6 +239,7 @@ enum WorkerResult {
     },
     ConfigApplied(Result<(), String>),
     Connections(Result<crate::observability::ConnectionSnapshot, String>),
+    Diagnostics(crate::diagnostics::Report),
 }
 
 impl App {
@@ -301,6 +303,7 @@ impl App {
             client,
             last_refresh: Instant::now() - Duration::from_secs(10),
             connections_view: crate::observability::ConnectionsView::default(),
+            diagnostics_view: crate::diagnostics::View::default(),
             last_connections_refresh: Instant::now() - Duration::from_secs(10),
             proxy_members_focused: false,
             selected_proxy_member_index: 0,
@@ -343,6 +346,9 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        if self.state.page == Page::Diagnostics && self.diagnostics_view.report.is_none() {
+            self.start_diagnostics(false);
+        }
         if self.state.page == Page::Connections {
             self.refresh_connections(false);
         }
@@ -363,6 +369,11 @@ impl App {
     fn process_worker_results(&mut self) {
         while let Ok(message) = self.worker_rx.try_recv() {
             match message {
+                WorkerResult::Diagnostics(report) => {
+                    self.diagnostics_view.loading = false;
+                    self.diagnostics_view.report = Some(report);
+                    self.diagnostics_view.scroll = 0;
+                }
                 WorkerResult::Connections(result) => self.connections_view.update(result),
                 WorkerResult::Proxies(result) => {
                     self.refresh_in_flight = false;
@@ -531,7 +542,8 @@ impl App {
                     Page::Proxies => Page::Rules,
                     Page::Rules => Page::Config,
                     Page::Config => Page::Connections,
-                    Page::Connections => Page::Dashboard,
+                    Page::Connections => Page::Diagnostics,
+                    Page::Diagnostics => Page::Dashboard,
                 };
                 self.state.selected = 0;
                 self.proxy_members_focused = false;
@@ -558,6 +570,11 @@ impl App {
             KeyCode::Char('4') => {
                 self.state.page = Page::Config;
                 self.state.selected = 0;
+                self.proxy_members_focused = false;
+                false
+            }
+            KeyCode::Char('7') => {
+                self.state.page = Page::Diagnostics;
                 self.proxy_members_focused = false;
                 false
             }
@@ -606,6 +623,23 @@ impl App {
             }
             KeyCode::Char('d') if self.state.page == Page::Dashboard => {
                 self.settings_dialog = Some(SettingsDialog::dns(&self.config.dns));
+                false
+            }
+            KeyCode::Char('g') if self.state.page == Page::Diagnostics => {
+                self.start_diagnostics(true);
+                false
+            }
+            KeyCode::Char('r') if self.state.page == Page::Diagnostics => {
+                self.start_diagnostics(false);
+                false
+            }
+            KeyCode::Char('j') | KeyCode::Down if self.state.page == Page::Diagnostics => {
+                self.diagnostics_view.scroll =
+                    self.diagnostics_view.scroll.saturating_add(1).min(1000);
+                false
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.state.page == Page::Diagnostics => {
+                self.diagnostics_view.scroll = self.diagnostics_view.scroll.saturating_sub(1);
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -714,6 +748,7 @@ impl App {
             Page::Rules => self.state.rules.rules.len(),
             Page::Config => self.config.providers.len(),
             Page::Connections => 0,
+            Page::Diagnostics => 0,
         };
         if len == 0 {
             return;
@@ -1106,6 +1141,27 @@ impl App {
         });
     }
 
+    fn start_diagnostics(&mut self, probe: bool) {
+        if self.diagnostics_view.loading {
+            return;
+        }
+        self.diagnostics_view.loading = true;
+        let options = crate::diagnostics::Options {
+            path: self
+                .config_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(crate::workspace::DEFAULT_SOURCE_PATH)),
+            client: self.client.clone(),
+            external: self.config_reload == ConfigReload::None,
+        };
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(WorkerResult::Diagnostics(
+                crate::diagnostics::collect_with_probe(&options, probe),
+            ));
+        });
+    }
+
     fn refresh_connections(&mut self, force: bool) {
         if self.connections_view.loading
             || (!force && self.last_connections_refresh.elapsed() < Duration::from_secs(1))
@@ -1132,16 +1188,19 @@ impl App {
             Constraint::Length(3),
         ])
         .split(area);
-        let tabs = Tabs::new(vec!["1 状态", "2 代理", "3 规则", "4 配置", "5 连接"])
-            .select(match self.state.page {
-                Page::Dashboard => 0,
-                Page::Proxies => 1,
-                Page::Rules => 2,
-                Page::Config => 3,
-                Page::Connections => 4,
-            })
-            .block(Block::bordered().title(" mihomo-tui 控制台 "))
-            .highlight_style(Style::default().fg(Color::Yellow));
+        let tabs = Tabs::new(vec![
+            "1 状态", "2 代理", "3 规则", "4 配置", "5 连接", "7 诊断",
+        ])
+        .select(match self.state.page {
+            Page::Dashboard => 0,
+            Page::Proxies => 1,
+            Page::Rules => 2,
+            Page::Config => 3,
+            Page::Connections => 4,
+            Page::Diagnostics => 5,
+        })
+        .block(Block::bordered().title(" mihomo-tui 控制台 "))
+        .highlight_style(Style::default().fg(Color::Yellow));
         frame.render_widget(tabs, root[0]);
         match self.state.page {
             Page::Dashboard => self.dashboard(frame, root[1]),
@@ -1149,6 +1208,7 @@ impl App {
             Page::Rules => self.rules(frame, root[1]),
             Page::Config => self.config(frame, root[1]),
             Page::Connections => self.connections_view.draw(frame, root[1]),
+            Page::Diagnostics => self.diagnostics_view.draw(frame, root[1]),
         }
         if let Some(dialog) = &self.add_provider {
             self.add_provider_dialog(frame, dialog);
@@ -1210,12 +1270,15 @@ impl App {
             };
         }
         match (self.state.page, self.proxy_members_focused) {
-            (Page::Dashboard, _) => "1-5/Tab 页面  t TUN  d DNS  p 重启核心  r 刷新  q 退出",
+            (Page::Dashboard, _) => "1-7/Tab 页面  t TUN  d DNS  p 重启核心  7 诊断  q 退出",
             (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重启核心  r 刷新  q 退出",
             (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重启核心  Left 返回",
             (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
             (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  x 删除  r 刷新  p 重启",
             (Page::Connections, _) => "j/k 选择  / 搜索  c 清除搜索  Enter 详情  r 刷新  Tab 页面",
+            (Page::Diagnostics, _) => {
+                "j/k 滚动  r 只读检查  g HTTPS探测github.com（联网） Tab 页面"
+            }
         }
     }
 
@@ -2849,6 +2912,25 @@ rules:
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn diagnostics_page_shows_scope_and_explicit_network_probe_at_eighty_columns() {
+        let mut app = App::new(None, None, None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+        assert_eq!(app.state.page, Page::Diagnostics);
+        app.diagnostics_view.report =
+            Some(crate::diagnostics::collect(&crate::diagnostics::Options {
+                path: PathBuf::from("/does-not-exist"),
+                client: None,
+                external: true,
+            }));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("不是持续监控"), "{screen}");
+        assert!(screen.contains("external_controller"), "{screen}");
+        assert!(screen.contains("联网"), "{screen}");
     }
 
     fn failing_provider_refresh_server() -> (String, thread::JoinHandle<()>) {

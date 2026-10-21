@@ -1,4 +1,4 @@
-mod connections;
+pub(crate) mod connections;
 #[cfg(test)]
 use connections::MAX_CONNECTIONS;
 pub use connections::{ConnectionSnapshot, ConnectionsView};

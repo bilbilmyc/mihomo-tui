@@ -49,8 +49,16 @@ impl MihomoClient {
     }
 
     fn read_json(&self, path: &str) -> Result<Value, String> {
+        self.read_json_timeout(path, Duration::from_secs(5))
+    }
+
+    fn read_json_timeout(&self, path: &str, timeout: Duration) -> Result<Value, String> {
         let response = self
-            .request(self.http.get(format!("{}{path}", self.base_url)))
+            .request(
+                self.http
+                    .get(format!("{}{path}", self.base_url))
+                    .timeout(timeout),
+            )
             .send()
             .map_err(|_| format!("{path} 请求失败或超时；检查 Controller 与鉴权"))?;
         if !response.status().is_success() {
@@ -76,8 +84,16 @@ impl MihomoClient {
     }
 
     pub fn connections(&self) -> Result<crate::observability::ConnectionSnapshot, String> {
-        let mut snapshot =
-            crate::observability::ConnectionSnapshot::parse(&self.read_json("/connections")?)?;
+        self.connections_with_timeout(Duration::from_secs(5))
+    }
+
+    pub fn connections_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<crate::observability::ConnectionSnapshot, String> {
+        let mut snapshot = crate::observability::ConnectionSnapshot::parse(
+            &self.read_json_timeout("/connections", timeout)?,
+        )?;
         for connection in &mut snapshot.connections {
             for value in [
                 &mut connection.host,

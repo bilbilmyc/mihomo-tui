@@ -1,4 +1,7 @@
 mod host;
+mod probe;
+mod view;
+pub use view::View;
 #[cfg(test)]
 mod tests;
 use crate::mihomo::MihomoClient;
@@ -135,6 +138,30 @@ pub fn collect(options: &Options) -> Report {
     report
 }
 
+pub fn collect_with_probe(options: &Options, probe: bool) -> Report {
+    let mut report = collect(options);
+    if probe {
+        if options.external {
+            report.checks.push(Check::new(
+                "https_probe",
+                Status::NotApplicable,
+                "外部 Controller 模式不在本机发请求冒充远端探测；请在对应主机运行 doctor --probe",
+            ));
+        } else {
+            report
+                .checks
+                .extend(self::probe::run(options.client.as_ref()));
+        }
+    } else {
+        report.checks.push(Check::new(
+            "https_probe",
+            Status::NotApplicable,
+            "未向外部目标发起请求；使用 --probe 显式探测 github.com",
+        ));
+    }
+    report
+}
+
 fn collect_host(report: &mut Report, configuration: Option<&Value>, runtime: Option<&Value>) {
     let service = match host::read(
         "systemctl",
@@ -170,7 +197,15 @@ fn collect_host(report: &mut Report, configuration: Option<&Value>, runtime: Opt
         ));
         return;
     };
-    if tun.get("enable").and_then(Value::as_bool) != Some(true) {
+    let Some(enabled) = tun.get("enable").and_then(Value::as_bool) else {
+        report.checks.push(Check::new(
+            "tun",
+            Status::Unknown,
+            "缺少可识别的运行时 TUN 开关",
+        ));
+        return;
+    };
+    if !enabled {
         report.checks.push(Check::new(
             "tun",
             Status::NotApplicable,
@@ -196,7 +231,17 @@ fn collect_host(report: &mut Report, configuration: Option<&Value>, runtime: Opt
         return;
     }
     let configured_tun = configuration.and_then(|config| config.get("tun"));
-    let table_value = configured_tun.and_then(|tun| tun.get("iproute2-table-index"));
+    let table_value = tun
+        .get("iproute2-table-index")
+        .or_else(|| configured_tun.and_then(|tun| tun.get("iproute2-table-index")));
+    if configured_tun.is_none() && table_value.is_none() {
+        report.checks.push(Check::new(
+            "tun_routes",
+            Status::Unknown,
+            "本地配置不可读，API 未提供表编号；不假定使用默认表 2022",
+        ));
+        return;
+    }
     let table = match table_value {
         None => 2022,
         Some(value) => match value

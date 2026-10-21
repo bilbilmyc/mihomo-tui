@@ -7,6 +7,7 @@ pub enum Page {
     Rules,
     Config,
     Connections,
+    Diagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

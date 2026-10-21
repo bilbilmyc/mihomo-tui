@@ -120,6 +120,9 @@ enum Command {
         /// 输出结构化 JSON；未知不等于健康，已确认的失败返回非零退出码。
         #[arg(long)]
         json: bool,
+        /// 显式向 github.com 发起普通 HTTPS 请求并观察新连接；不使用环境代理。
+        #[arg(long)]
+        probe: bool,
     },
     /// 检查或显式升级托管 Mihomo 内核。
     #[command(
@@ -220,7 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Command::Doctor { json } => {
+        Command::Doctor { json, probe } => {
             let path = args
                 .workspace
                 .clone()
@@ -237,11 +240,14 @@ fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error:
                 .clone()
                 .or_else(|| discovered.and_then(|info| info.secret));
             let client = controller.and_then(|url| mihomo::MihomoClient::new(url, secret).ok());
-            let report = diagnostics::collect(&diagnostics::Options {
-                path,
-                client,
-                external,
-            });
+            let report = diagnostics::collect_with_probe(
+                &diagnostics::Options {
+                    path,
+                    client,
+                    external,
+                },
+                *probe,
+            );
             if *json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -307,9 +313,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn real_network_probe_is_explicitly_opt_in() {
+        let args = Args::try_parse_from(["mihomo-tui", "doctor"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Doctor { probe: false, .. })
+        ));
+        let args = Args::try_parse_from(["mihomo-tui", "doctor", "--probe"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Doctor { probe: true, .. })
+        ));
+    }
+
+    #[test]
     fn doctor_is_a_read_only_cli_command_with_json_output() {
         let args = Args::try_parse_from(["mihomo-tui", "doctor", "--json"]).unwrap();
-        assert!(matches!(args.command, Some(Command::Doctor { json: true })));
+        assert!(matches!(
+            args.command,
+            Some(Command::Doctor { json: true, .. })
+        ));
         let help = command_help(&["doctor".into()]).unwrap();
         assert!(help.contains("只读"));
     }
