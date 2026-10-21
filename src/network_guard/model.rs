@@ -2,6 +2,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const PROTOCOL: u32 = 1;
+pub fn valid_invocation(value: &str) -> bool {
+    hex_id(value, 32) && value.bytes().any(|byte| byte != b'0')
+}
+pub fn valid_boot(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+        && value.bytes().any(|byte| byte != b'0' && byte != b'-')
+}
 
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -67,6 +81,7 @@ impl Phase {
 pub struct RestartWitness {
     pub stamp: Stamp,
     pub invocation: Option<String>,
+    pub same_activation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +111,8 @@ impl Transaction {
         if !(30..=300).contains(&seconds)
             || !hex_id(&id, 32)
             || baseline.binding != candidate.binding
+            || !valid_boot(&stamp.boot_id)
+            || !valid_invocation(&invocation)
         {
             return Err("保护事务参数或基线绑定无效".into());
         }
@@ -138,6 +155,8 @@ impl Transaction {
 #[serde(deny_unknown_fields)]
 pub struct Ledger {
     pub protocol: u32,
+    #[serde(default)]
+    pub worker_sha256: Option<String>,
     pub checkpoint: Option<Snapshot>,
     pub transaction: Option<Transaction>,
 }
@@ -146,6 +165,7 @@ impl Default for Ledger {
     fn default() -> Self {
         Self {
             protocol: PROTOCOL,
+            worker_sha256: None,
             checkpoint: None,
             transaction: None,
         }
@@ -169,6 +189,10 @@ impl Ledger {
     pub fn validate(&self) -> Result<(), String> {
         if self.protocol != PROTOCOL
             || self
+                .worker_sha256
+                .as_ref()
+                .is_some_and(|hash| !hex_id(hash, 64))
+            || self
                 .checkpoint
                 .as_ref()
                 .is_some_and(|snapshot| !snapshot.validate())
@@ -182,18 +206,20 @@ impl Ledger {
                 || !tx.candidate.validate()
                 || tx.baseline.binding != tx.candidate.binding
                 || !duration.is_some_and(|duration| (30_000..=300_000).contains(&duration))
-                || tx.started.boot_id.is_empty()
-                || tx.started.boot_id.len() > 64
-                || tx.pre_apply_invocation.is_empty()
-                || tx.pre_apply_invocation.len() > 128
+                || !valid_boot(&tx.started.boot_id)
+                || !valid_invocation(&tx.pre_apply_invocation)
+                || (tx.phase == Phase::RestartPending && tx.rollback_witness.is_none())
                 || tx.attempts > 3
                 || tx
                     .last_error
                     .as_ref()
                     .is_some_and(|error| error.len() > 4096)
                 || tx.rollback_witness.as_ref().is_some_and(|witness| {
-                    witness.stamp.boot_id.len() > 64
-                        || witness.invocation.as_ref().is_some_and(|id| id.len() > 128)
+                    !valid_boot(&witness.stamp.boot_id)
+                        || witness
+                            .invocation
+                            .as_ref()
+                            .is_none_or(|id| !valid_invocation(id))
                 })
             {
                 return Err("恢复事务元数据无效；未修改配置".into());
@@ -248,11 +274,11 @@ mod tests {
             Snapshot::fixture("b", "1"),
             Snapshot::fixture("c", "2"),
             &Stamp {
-                boot_id: "boot-a".into(),
+                boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 uptime_ms: 10_000,
             },
             90,
-            "invocation-before".into(),
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
         )
         .unwrap()
     }
@@ -261,19 +287,19 @@ mod tests {
     fn expiry_uses_boot_time_and_reboot_never_grants_another_confirmation_window() {
         let trial = trial();
         assert!(!trial.due(&Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 99_999
         }));
         assert!(trial.due(&Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 100_000
         }));
         assert!(trial.due(&Stamp {
-            boot_id: "boot-b".into(),
+            boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
             uptime_ms: 10
         }));
         assert!(trial.due(&Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 1
         }));
     }
@@ -282,7 +308,7 @@ mod tests {
     fn only_the_exact_trial_can_be_confirmed_before_the_deadline() {
         let mut trial = trial();
         let now = Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 20_000,
         };
         assert!(trial.check_confirmation(&trial.id, &now).is_ok());
@@ -295,7 +321,7 @@ mod tests {
     fn startup_has_a_lock_free_path_for_idle_and_terminal_transactions() {
         let mut ledger = Ledger::default();
         let now = Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 20_000,
         };
         assert_eq!(ledger.startup_gate(&now, None, "unknown"), Gate::Allow);
@@ -314,7 +340,7 @@ mod tests {
             ..Ledger::default()
         };
         let now = Stamp {
-            boot_id: "boot-b".into(),
+            boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
             uptime_ms: 10,
         };
         assert_eq!(
@@ -325,5 +351,31 @@ mod tests {
             ),
             Gate::Recover
         );
+    }
+
+    #[test]
+    fn malformed_rollback_witnesses_are_not_activation_evidence() {
+        for (boot, invocation) in [
+            ("", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ""),
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "not-an-id"),
+        ] {
+            let mut tx = trial();
+            tx.phase = Phase::RestartPending;
+            tx.rollback_witness = Some(RestartWitness {
+                stamp: Stamp {
+                    boot_id: boot.into(),
+                    uptime_ms: 20_000,
+                },
+                invocation: Some(invocation.into()),
+                same_activation: false,
+            });
+            let ledger = Ledger {
+                checkpoint: Some(tx.baseline.clone()),
+                transaction: Some(tx),
+                ..Ledger::default()
+            };
+            assert!(ledger.validate().is_err());
+        }
     }
 }

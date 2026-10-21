@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub(super) struct Fake {
     pub now: Stamp,
     pub binding: String,
+    pub binding_error: Option<BindingError>,
     pub state: Service,
     pub restarts: usize,
     pub armed: bool,
@@ -19,7 +20,10 @@ impl Backend for Fake {
     fn stamp(&mut self) -> Result<Stamp, String> {
         Ok(self.now.clone())
     }
-    fn binding(&mut self) -> Result<String, String> {
+    fn binding(&mut self) -> Result<String, BindingError> {
+        if let Some(error) = &self.binding_error {
+            return Err(error.clone());
+        }
         Ok(self.binding.clone())
     }
     fn service(&mut self) -> Result<Service, String> {
@@ -46,7 +50,7 @@ impl Backend for Fake {
         if self.fail_restart {
             return Err("fixture restart failure".into());
         }
-        self.state.invocation = Some(format!("invocation-{}", self.restarts));
+        self.state.invocation = Some(format!("{:032x}", self.restarts));
         self.state.active = true;
         self.state.starting = false;
         self.state.job = false;
@@ -70,16 +74,17 @@ fn fixture() -> Fixture {
     store::write_new(&source, b"rules: ['MATCH,DIRECT']\ntun: {enable: false}\n").unwrap();
     let backend = Fake {
         now: Stamp {
-            boot_id: "boot-a".into(),
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             uptime_ms: 10_000,
         },
         binding: "f".repeat(64),
+        binding_error: None,
         state: Service {
             active: true,
             starting: false,
             enabled: true,
             job: false,
-            invocation: Some("initial".into()),
+            invocation: Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into()),
         },
         restarts: 0,
         armed: false,
@@ -179,6 +184,7 @@ fn a_restart_intent_survives_a_crash_before_the_restart_was_queued() {
     tx.rollback_witness = Some(RestartWitness {
         stamp: f.engine.host.now.clone(),
         invocation: f.engine.host.state.invocation.clone(),
+        same_activation: false,
     });
     super::super::restore::install(&f.engine.source, &f.engine.store, tx).unwrap();
     f.engine.store.save(&ledger).unwrap();
@@ -192,12 +198,12 @@ fn boot_recovery_installs_before_start_and_does_not_restart_its_own_unit() {
     let mut f = fixture();
     f.engine.apply(90).unwrap();
     f.engine.host.now = Stamp {
-        boot_id: "boot-b".into(),
+        boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
         uptime_ms: 1000,
     };
     f.engine.host.state.active = false;
     f.engine.host.state.starting = true;
-    f.engine.host.state.invocation = Some("boot-activation".into());
+    f.engine.host.state.invocation = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
     let ledger = f.engine.recover(None, false, true).unwrap();
     assert_eq!(ledger.transaction.unwrap().phase, Phase::RestartPending);
     assert_eq!(f.engine.host.restarts, 1);
@@ -256,4 +262,31 @@ fn old_confirmation_and_old_timer_wakeup_cannot_change_a_later_trial() {
         .unwrap();
     assert_eq!(current.id, second.id);
     assert_eq!(current.phase, Phase::Trial);
+}
+
+#[test]
+fn unsupported_binding_inspection_is_persisted_as_conflict_and_transient_failures_are_bounded() {
+    let mut f = fixture();
+    let tx = f.engine.apply(90).unwrap().transaction.unwrap();
+    f.engine.host.now.uptime_ms = tx.deadline_uptime_ms;
+    f.engine.host.binding_error = Some(BindingError::Conflict("unknown service override".into()));
+    assert!(f.engine.recover(None, false, false).is_err());
+    assert_eq!(
+        f.engine.store.load().unwrap().transaction.unwrap().phase,
+        Phase::Conflict
+    );
+    assert_eq!(f.engine.host.restarts, 1);
+    let mut g = fixture();
+    let tx = g.engine.apply(90).unwrap().transaction.unwrap();
+    g.engine.host.now.uptime_ms = tx.deadline_uptime_ms;
+    g.engine.host.binding_error = Some(BindingError::Unavailable(
+        "temporary inspection failure".into(),
+    ));
+    for _ in 0..4 {
+        let _ = g.engine.recover(None, false, false);
+    }
+    let state = g.engine.store.load().unwrap().transaction.unwrap();
+    assert_eq!(state.phase, Phase::RecoveryFailed);
+    assert_eq!(state.attempts, 3);
+    assert_eq!(g.engine.host.restarts, 1);
 }

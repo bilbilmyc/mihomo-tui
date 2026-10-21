@@ -14,9 +14,32 @@ pub struct Service {
     pub invocation: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum BindingError {
+    Conflict(String),
+    Unavailable(String),
+}
+impl From<String> for BindingError {
+    fn from(value: String) -> Self {
+        Self::Unavailable(value)
+    }
+}
+impl From<&str> for BindingError {
+    fn from(value: &str) -> Self {
+        Self::Conflict(value.into())
+    }
+}
+impl From<BindingError> for String {
+    fn from(value: BindingError) -> Self {
+        match value {
+            BindingError::Conflict(message) | BindingError::Unavailable(message) => message,
+        }
+    }
+}
+
 pub trait Backend {
     fn stamp(&mut self) -> Result<Stamp, String>;
-    fn binding(&mut self) -> Result<String, String>;
+    fn binding(&mut self) -> Result<String, BindingError>;
     fn service(&mut self) -> Result<Service, String>;
     fn validate(&mut self, snapshot: &Path) -> Result<(), String>;
     fn arm(&mut self, new_trial: bool) -> Result<(), String>;
@@ -140,7 +163,11 @@ impl<B: Backend> Engine<B> {
             return Ok(ledger);
         }
         tx.check_confirmation(id, &self.host.stamp()?)?;
-        if self.host.binding()? != tx.baseline.binding {
+        let binding = match self.host.binding() {
+            Ok(binding) => binding,
+            Err(error) => return self.inspection_failure(error),
+        };
+        if binding != tx.baseline.binding {
             return Err("服务/核心绑定已改变，不能确认".into());
         }
         self.store.read_snapshot(&tx.candidate)?;
@@ -192,6 +219,21 @@ impl<B: Backend> Engine<B> {
         Err(tx.last_error.clone().unwrap_or_default())
     }
 
+    pub fn inspection_failure(&self, error: BindingError) -> Result<Ledger, String> {
+        let mut ledger = self.store.load()?;
+        let Some(mut tx) = ledger.transaction.clone().filter(|tx| tx.phase.pending()) else {
+            return Ok(ledger);
+        };
+        let (conflict, message) = match error {
+            BindingError::Conflict(message) => (true, message),
+            BindingError::Unavailable(message) => {
+                tx.attempts = (tx.attempts + 1).min(3);
+                (false, message)
+            }
+        };
+        self.fail(&mut ledger, &mut tx, conflict, &message)
+    }
+
     pub fn recover(
         &mut self,
         id: Option<&str>,
@@ -215,7 +257,14 @@ impl<B: Backend> Engine<B> {
         if !manual && !startup && matches!(tx.phase, Phase::Armed | Phase::Trial) && !tx.due(&now) {
             return Ok(ledger);
         }
-        if self.host.binding()? != tx.baseline.binding {
+        if !manual && !startup && tx.attempts >= 3 && tx.phase == Phase::RecoveryFailed {
+            return Ok(ledger);
+        }
+        let binding = match self.host.binding() {
+            Ok(binding) => binding,
+            Err(error) => return self.inspection_failure(error),
+        };
+        if binding != tx.baseline.binding {
             return self.fail(
                 &mut ledger,
                 &mut tx,
@@ -223,7 +272,10 @@ impl<B: Backend> Engine<B> {
                 "核心或服务绑定已变化，未在未知绑定下恢复配置",
             );
         }
-        let service = self.host.service()?;
+        let service = match self.host.service() {
+            Ok(service) => service,
+            Err(error) => return self.inspection_failure(BindingError::Unavailable(error)),
+        };
         if !service.enabled {
             return self.fail(&mut ledger, &mut tx, true, "服务启用状态已改变，需人工处理");
         }
@@ -234,19 +286,17 @@ impl<B: Backend> Engine<B> {
             self.host.arm(false)?;
             tx.attempts = 0;
         }
-        if !manual && !startup && tx.attempts >= 3 && tx.phase == Phase::RecoveryFailed {
-            return Ok(ledger);
-        }
         let source_hash = restore::read_source(&self.source)?.as_deref().map(digest);
         if tx.phase == Phase::RestartPending
             && source_hash.as_deref() == Some(tx.baseline.sha256.as_str())
             && let Some(witness) = &tx.rollback_witness
         {
-            if service.active
-                && service.invocation.is_some()
-                && (witness.stamp.boot_id != now.boot_id
-                    || service.invocation != witness.invocation)
-            {
+            let activation_matches = if witness.same_activation {
+                witness.stamp.boot_id == now.boot_id && service.invocation == witness.invocation
+            } else {
+                witness.stamp.boot_id != now.boot_id || service.invocation != witness.invocation
+            };
+            if service.active && service.invocation.is_some() && activation_matches {
                 // Reestablish file/directory durability before terminal publication.
                 if let Err(error) = restore::install(&self.source, &self.store, &tx) {
                     return self.fail(&mut ledger, &mut tx, error.conflict, &error.message);
@@ -290,9 +340,30 @@ impl<B: Backend> Engine<B> {
                 "无法取得恢复前核心调用凭据，未宣告成功",
             );
         }
+        if service.invocation.is_none() {
+            if startup {
+                return self.fail(
+                    &mut ledger,
+                    &mut tx,
+                    false,
+                    "启动调用缺少有效 InvocationID，不能记录恢复凭据",
+                );
+            }
+            // No known activation witness exists yet. Queue a start, but do not claim it completed.
+            if self.host.restart().is_err() {
+                return self.fail(
+                    &mut ledger,
+                    &mut tx,
+                    false,
+                    "基线已安装，但核心启动请求失败",
+                );
+            }
+            return Ok(ledger);
+        }
         tx.rollback_witness = Some(RestartWitness {
             stamp: self.host.stamp()?,
-            invocation: if startup { None } else { service.invocation },
+            invocation: service.invocation,
+            same_activation: startup,
         });
         tx.phase = Phase::RestartPending;
         self.publish(&mut ledger, &tx)?;

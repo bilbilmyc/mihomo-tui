@@ -187,11 +187,11 @@ mod tests {
             baseline,
             candidate,
             &Stamp {
-                boot_id: "boot".into(),
+                boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 uptime_ms: 0,
             },
             90,
-            "before".into(),
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
         )
         .unwrap();
         (root, store, source, tx)

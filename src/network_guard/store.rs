@@ -10,6 +10,13 @@ use std::{
 pub const CONFIG_LIMIT: usize = 2 * 1024 * 1024;
 const LEDGER_LIMIT: usize = 64 * 1024;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedLedger {
+    payload: Ledger,
+    sha256: String,
+}
+
 pub fn random_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")
@@ -218,15 +225,25 @@ impl Store {
 
     pub fn load(&self) -> Result<Ledger, String> {
         let bytes = read_private(&self.root.join("ledger.json"), LEDGER_LIMIT)?;
-        let ledger: Ledger =
+        let envelope: SealedLedger =
             serde_json::from_slice(&bytes).map_err(|_| "恢复账本无法解析；未重置或修改配置")?;
+        let encoded = serde_json::to_vec(&envelope.payload).map_err(|_| "无法核对账本完整性")?;
+        if !hex_id(&envelope.sha256, 64) || digest(&encoded) != envelope.sha256 {
+            return Err("恢复账本完整性校验失败；未修改配置".into());
+        }
+        let ledger = envelope.payload;
         ledger.validate()?;
         Ok(ledger)
     }
 
     pub fn save(&self, ledger: &Ledger) -> Result<(), String> {
         ledger.validate()?;
-        let bytes = serde_json::to_vec(ledger).map_err(|_| "无法编码恢复账本")?;
+        let encoded = serde_json::to_vec(ledger).map_err(|_| "无法编码恢复账本")?;
+        let envelope = SealedLedger {
+            payload: ledger.clone(),
+            sha256: digest(&encoded),
+        };
+        let bytes = serde_json::to_vec(&envelope).map_err(|_| "无法编码恢复账本完整性封装")?;
         if bytes.len() > LEDGER_LIMIT {
             return Err("恢复账本超过上限".into());
         }
@@ -368,6 +385,31 @@ pub(super) mod tests {
         assert!(store.snapshot_path(&baseline.id).unwrap().exists());
         assert!(!store.snapshot_path(&orphan.id).unwrap().exists());
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn valid_looking_metadata_corruption_is_detected_by_the_ledger_seal() {
+        let root = directory();
+        let store = Store::initialize(&root).unwrap();
+        let snapshot = store.snapshot(b"baseline", &"f".repeat(64)).unwrap();
+        store
+            .save(&Ledger {
+                checkpoint: Some(snapshot),
+                ..Ledger::default()
+            })
+            .unwrap();
+        let path = root.join("ledger.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let payload = if value.get("payload").is_some() {
+            &mut value["payload"]
+        } else {
+            &mut value
+        };
+        payload["checkpoint"]["binding"] = serde_json::Value::String("e".repeat(64));
+        atomic_private(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(store.load().is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
