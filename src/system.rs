@@ -73,12 +73,12 @@ fn production_owner_is_trusted(uid: u32) -> bool {
 }
 
 #[cfg(all(unix, not(test)))]
-fn owner_is_trusted(uid: u32) -> bool {
+pub(crate) fn owner_is_trusted(uid: u32) -> bool {
     production_owner_is_trusted(uid)
 }
 
 #[cfg(all(unix, test))]
-fn owner_is_trusted(uid: u32) -> bool {
+pub(crate) fn owner_is_trusted(uid: u32) -> bool {
     production_owner_is_trusted(uid)
         || std::env::current_exe()
             .ok()

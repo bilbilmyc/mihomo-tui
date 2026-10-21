@@ -9,6 +9,8 @@ mod dialogs;
 mod discovery;
 mod mihomo;
 mod models;
+#[cfg(test)]
+mod network_guard;
 mod observability;
 mod runtime;
 mod sanitize;
