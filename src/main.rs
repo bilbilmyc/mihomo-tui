@@ -4,11 +4,13 @@ mod core;
 mod core_manager;
 mod core_package;
 mod core_upgrade;
+mod diagnostics;
 mod dialogs;
 mod discovery;
 mod mihomo;
 mod models;
 mod runtime;
+mod sanitize;
 mod system;
 mod workspace;
 
@@ -111,6 +113,13 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// 只读诊断 Controller、服务与 IPv4 TUN 路由；不会安装或重启服务。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Doctor {
+        /// 输出结构化 JSON；未知不等于健康，已确认的失败返回非零退出码。
+        #[arg(long)]
+        json: bool,
+    },
     /// 检查或显式升级托管 Mihomo 内核。
     #[command(
         after_help = CORE_AFTER_HELP,
@@ -152,8 +161,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if let Some(command) = args.command {
-        return run_command(command);
+    if let Some(command) = &args.command {
+        return run_command(command, &args);
     }
     let controller_was_explicit = args.controller.is_some();
     let config_was_explicit = args.config.is_some();
@@ -208,8 +217,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Doctor { json } => {
+            let path = args
+                .workspace
+                .clone()
+                .or_else(|| args.config.clone())
+                .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_SOURCE_PATH));
+            let external = args.controller.is_some();
+            let discovered = (!external).then(|| discovery::discover(&path)).flatten();
+            let controller = args
+                .controller
+                .clone()
+                .or_else(|| discovered.as_ref().map(|info| info.controller.clone()));
+            let secret = args
+                .secret
+                .clone()
+                .or_else(|| discovered.and_then(|info| info.secret));
+            let client = controller.and_then(|url| mihomo::MihomoClient::new(url, secret).ok());
+            let report = diagnostics::collect(&diagnostics::Options {
+                path,
+                client,
+                external,
+            });
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render());
+            }
+            if report.has_failures() {
+                return Err(std::io::Error::other("诊断发现失败项；未执行自动修复").into());
+            }
+            Ok(())
+        }
         Command::Core {
             command: CoreCommand::Status,
         } => {
@@ -226,7 +267,7 @@ fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Command::Help { command } => {
-            println!("{}", command_help(&command).map_err(std::io::Error::other)?);
+            println!("{}", command_help(command).map_err(std::io::Error::other)?);
             Ok(())
         }
     }
@@ -263,6 +304,14 @@ fn apply_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_is_a_read_only_cli_command_with_json_output() {
+        let args = Args::try_parse_from(["mihomo-tui", "doctor", "--json"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Doctor { json: true })));
+        let help = command_help(&["doctor".into()]).unwrap();
+        assert!(help.contains("只读"));
+    }
 
     #[test]
     fn explicit_controller_or_config_never_manages_the_local_service() {

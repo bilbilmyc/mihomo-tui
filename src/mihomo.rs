@@ -4,7 +4,7 @@ use crate::{
 };
 use reqwest::blocking::Client;
 use serde_json::Value;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, io::Read, time::Duration};
 
 const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 const DELAY_TIMEOUT_MS: u64 = 5_000;
@@ -24,7 +24,11 @@ impl MihomoClient {
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             secret,
-            http: Client::builder().timeout(Duration::from_secs(5)).build()?,
+            http: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()?,
         })
     }
 
@@ -38,6 +42,37 @@ impl MihomoClient {
             }
             _ => request,
         }
+    }
+
+    pub fn redact(&self, value: &str) -> String {
+        crate::sanitize::text(value, self.secret.as_deref())
+    }
+
+    fn read_json(&self, path: &str) -> Result<Value, String> {
+        let response = self
+            .request(self.http.get(format!("{}{path}", self.base_url)))
+            .send()
+            .map_err(|_| format!("{path} 请求失败或超时；检查 Controller 与鉴权"))?;
+        if !response.status().is_success() {
+            return Err(format!("{path} 返回 HTTP {}", response.status().as_u16()));
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| format!("{path} 响应读取失败或超时"))?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(format!("{path} 响应超过 4 MiB 诊断上限"));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| format!("{path} 响应不是有效 JSON"))
+    }
+
+    pub fn runtime_config(&self) -> Result<Value, String> {
+        let config = self.read_json("/configs")?;
+        if !config.is_object() {
+            return Err("/configs 响应不是基本配置对象".into());
+        }
+        Ok(config)
     }
 
     pub fn proxies(&self) -> Result<Vec<ProxySummary>, String> {
