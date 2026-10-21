@@ -9,6 +9,7 @@ mod dialogs;
 mod discovery;
 mod mihomo;
 mod models;
+mod observability;
 mod runtime;
 mod sanitize;
 mod system;

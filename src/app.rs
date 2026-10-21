@@ -18,6 +18,8 @@ pub struct App {
     pub state: AppState,
     client: Option<MihomoClient>,
     last_refresh: Instant,
+    connections_view: crate::observability::ConnectionsView,
+    last_connections_refresh: Instant,
     proxy_members_focused: bool,
     selected_proxy_member_index: usize,
     config: ConfigSnapshot,
@@ -235,6 +237,7 @@ enum WorkerResult {
         result: Result<ProviderRefreshData, String>,
     },
     ConfigApplied(Result<(), String>),
+    Connections(Result<crate::observability::ConnectionSnapshot, String>),
 }
 
 impl App {
@@ -297,6 +300,8 @@ impl App {
             state,
             client,
             last_refresh: Instant::now() - Duration::from_secs(10),
+            connections_view: crate::observability::ConnectionsView::default(),
+            last_connections_refresh: Instant::now() - Duration::from_secs(10),
             proxy_members_focused: false,
             selected_proxy_member_index: 0,
             config,
@@ -338,6 +343,9 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        if self.state.page == Page::Connections {
+            self.refresh_connections(false);
+        }
         if self.refresh_in_flight || self.last_refresh.elapsed() < Duration::from_secs(5) {
             return;
         }
@@ -355,6 +363,7 @@ impl App {
     fn process_worker_results(&mut self) {
         while let Ok(message) = self.worker_rx.try_recv() {
             match message {
+                WorkerResult::Connections(result) => self.connections_view.update(result),
                 WorkerResult::Proxies(result) => {
                     self.refresh_in_flight = false;
                     match result {
@@ -507,6 +516,9 @@ impl App {
             }
             return false;
         }
+        if self.state.page == Page::Connections && self.connections_view.handle_key(key) {
+            return false;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => true,
             KeyCode::Char('p') => {
@@ -518,7 +530,8 @@ impl App {
                     Page::Dashboard => Page::Proxies,
                     Page::Proxies => Page::Rules,
                     Page::Rules => Page::Config,
-                    Page::Config => Page::Dashboard,
+                    Page::Config => Page::Connections,
+                    Page::Connections => Page::Dashboard,
                 };
                 self.state.selected = 0;
                 self.proxy_members_focused = false;
@@ -545,6 +558,11 @@ impl App {
             KeyCode::Char('4') => {
                 self.state.page = Page::Config;
                 self.state.selected = 0;
+                self.proxy_members_focused = false;
+                false
+            }
+            KeyCode::Char('5') => {
+                self.state.page = Page::Connections;
                 self.proxy_members_focused = false;
                 false
             }
@@ -650,6 +668,10 @@ impl App {
                 }
                 false
             }
+            KeyCode::Char('r') if self.state.page == Page::Connections => {
+                self.refresh_connections(true);
+                false
+            }
             KeyCode::Char('r') if self.state.page == Page::Config => {
                 self.refresh_provider();
                 false
@@ -691,6 +713,7 @@ impl App {
             Page::Proxies => self.state.proxies.len(),
             Page::Rules => self.state.rules.rules.len(),
             Page::Config => self.config.providers.len(),
+            Page::Connections => 0,
         };
         if len == 0 {
             return;
@@ -1083,6 +1106,24 @@ impl App {
         });
     }
 
+    fn refresh_connections(&mut self, force: bool) {
+        if self.connections_view.loading
+            || (!force && self.last_connections_refresh.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.connections_view.error = Some("未连接 Controller；不显示示例连接".into());
+            return;
+        };
+        self.connections_view.loading = true;
+        self.last_connections_refresh = Instant::now();
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(WorkerResult::Connections(client.connections()));
+        });
+    }
+
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         let root = Layout::vertical([
@@ -1091,12 +1132,13 @@ impl App {
             Constraint::Length(3),
         ])
         .split(area);
-        let tabs = Tabs::new(vec!["1 状态", "2 代理", "3 规则", "4 配置"])
+        let tabs = Tabs::new(vec!["1 状态", "2 代理", "3 规则", "4 配置", "5 连接"])
             .select(match self.state.page {
                 Page::Dashboard => 0,
                 Page::Proxies => 1,
                 Page::Rules => 2,
                 Page::Config => 3,
+                Page::Connections => 4,
             })
             .block(Block::bordered().title(" mihomo-tui 控制台 "))
             .highlight_style(Style::default().fg(Color::Yellow));
@@ -1106,6 +1148,7 @@ impl App {
             Page::Proxies => self.proxies(frame, root[1]),
             Page::Rules => self.rules(frame, root[1]),
             Page::Config => self.config(frame, root[1]),
+            Page::Connections => self.connections_view.draw(frame, root[1]),
         }
         if let Some(dialog) = &self.add_provider {
             self.add_provider_dialog(frame, dialog);
@@ -1167,11 +1210,12 @@ impl App {
             };
         }
         match (self.state.page, self.proxy_members_focused) {
-            (Page::Dashboard, _) => "1-4/Tab 页面  t TUN  d DNS  p 重启核心  r 刷新  q 退出",
+            (Page::Dashboard, _) => "1-5/Tab 页面  t TUN  d DNS  p 重启核心  r 刷新  q 退出",
             (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重启核心  r 刷新  q 退出",
             (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重启核心  Left 返回",
             (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
             (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  x 删除  r 刷新  p 重启",
+            (Page::Connections, _) => "j/k 选择  / 搜索  c 清除搜索  Enter 详情  r 刷新  Tab 页面",
         }
     }
 
@@ -2791,6 +2835,20 @@ rules:
             request_count
         });
         (format!("http://{address}"), server)
+    }
+
+    #[test]
+    fn connections_page_and_filter_work_at_eighty_columns() {
+        let mut app = App::new(None, None, None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("活跃连接"), "{screen}");
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
     }
 
     fn failing_provider_refresh_server() -> (String, thread::JoinHandle<()>) {

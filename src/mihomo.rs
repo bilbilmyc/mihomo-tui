@@ -75,6 +75,27 @@ impl MihomoClient {
         Ok(config)
     }
 
+    pub fn connections(&self) -> Result<crate::observability::ConnectionSnapshot, String> {
+        let mut snapshot =
+            crate::observability::ConnectionSnapshot::parse(&self.read_json("/connections")?)?;
+        for connection in &mut snapshot.connections {
+            for value in [
+                &mut connection.host,
+                &mut connection.destination,
+                &mut connection.network,
+                &mut connection.inbound,
+                &mut connection.rule,
+                &mut connection.rule_payload,
+            ] {
+                *value = self.redact(value);
+            }
+            for chain in &mut connection.chains {
+                *chain = self.redact(chain);
+            }
+        }
+        Ok(snapshot)
+    }
+
     pub fn proxies(&self) -> Result<Vec<ProxySummary>, String> {
         let response = self
             .request(self.http.get(format!("{}/proxies", self.base_url)))
@@ -334,6 +355,44 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn connection_snapshots_use_header_auth_and_never_display_the_secret() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            assert!(headers.starts_with("GET /connections HTTP/1.1"));
+            assert!(
+                headers
+                    .to_lowercase()
+                    .contains("authorization: bearer fixture-secret")
+            );
+            let body = r#"{"connections":[{"id":"test","metadata":{"host":"fixture-secret"},"chains":["fixture-secret"]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let client =
+            MihomoClient::new(format!("http://{address}"), Some("fixture-secret".into())).unwrap();
+        let snapshot = client.connections().unwrap();
+        assert!(!snapshot.connections[0].host.contains("fixture-secret"));
+        assert!(!snapshot.connections[0].route().contains("fixture-secret"));
+        server.join().unwrap();
+    }
 
     #[test]
     fn provider_refresh_url_escapes_provider_names() {
