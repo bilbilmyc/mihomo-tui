@@ -9,7 +9,6 @@ mod dialogs;
 mod discovery;
 mod mihomo;
 mod models;
-#[cfg(test)]
 mod network_guard;
 mod observability;
 mod runtime;
@@ -47,6 +46,14 @@ const TOP_LEVEL_AFTER_HELP: &str = r#"快速开始：
   sudo mihomo-tui doctor         检查 Controller、服务和 IPv4 TUN 路由
   sudo mihomo-tui doctor --json  输出结构化报告，不自动修复
   sudo mihomo-tui doctor --probe 显式探测 github.com 并观察目标连接
+
+可选网络保护（首版仅 TUN/DNS）：
+  sudo mihomo-tui network status
+      只读查看保护状态；不初始化或重启服务。
+  sudo mihomo-tui network checkpoint --confirm-working
+      仅在你确认当前文件已加载且网络正常时，登记基线并准备恢复设施。
+  sudo mihomo-tui network apply --confirm-within 90
+      保护应用，须在窗口内通过 network confirm 明确确认。
 
 完整服务器说明：
   /usr/share/doc/mihomo-tui/server-guide.md
@@ -121,6 +128,12 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// 本机 TUN/DNS 保护应用、人工确认与恢复；不会隐式建立可工作基线。
+    #[command(help_template = COMMAND_HELP_TEMPLATE)]
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
     /// 只读诊断 Controller、服务与 IPv4 TUN 路由；不会安装或重启服务。
     #[command(help_template = LEAF_HELP_TEMPLATE)]
     Doctor {
@@ -158,6 +171,50 @@ enum CoreCommand {
     /// 显式暂存、激活并健康检查内核更新，失败时回滚。
     #[command(after_help = CORE_UPGRADE_AFTER_HELP, help_template = LEAF_HELP_TEMPLATE)]
     Upgrade,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkCommand {
+    /// 只读查看基线、试运行和恢复状态，不初始化目录。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Status {
+        /// 输出结构化 JSON，不包含配置正文。
+        #[arg(long)]
+        json: bool,
+    },
+    /// 明确登记已加载且网络可用的基线，并准备独立恢复设施；不重启核心。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Checkpoint {
+        /// 我已确认当前磁盘配置已被核心加载，并已检查 SSH/所需网络。
+        #[arg(long, required = true)]
+        confirm_working: bool,
+    },
+    /// 显式保护应用 TUN/DNS 配置，须在期限内人工确认，否则恢复基线。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Apply {
+        /// 确认窗口秒数，30–300；恢复还受调度及服务启动耗时影响。
+        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(30..=300))]
+        confirm_within: u64,
+    },
+    /// 我已检查新 SSH 会话及所需网络，保留该事务的新配置。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Confirm {
+        #[arg(value_name = "事务ID")]
+        id: String,
+    },
+    /// 立即请求恢复指定事务基线，不覆盖检测到的后续编辑。
+    #[command(help_template = LEAF_HELP_TEMPLATE)]
+    Rollback {
+        #[arg(value_name = "事务ID")]
+        id: String,
+    },
+    #[command(name = "_recover", hide = true)]
+    Recover {
+        #[arg(long)]
+        startup: bool,
+    },
+    #[command(name = "_protocol", hide = true)]
+    Protocol,
 }
 
 fn main() -> ExitCode {
@@ -230,6 +287,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Network { command } => {
+            if !matches!(
+                command,
+                NetworkCommand::Recover { .. } | NetworkCommand::Protocol
+            ) && !network_target_is_local(args)
+            {
+                return Err(std::io::Error::other(
+                    "网络保护仅支持默认本机托管模式；外部 Controller/自定义路径不会管理本机服务",
+                )
+                .into());
+            }
+            let report = match command {
+                NetworkCommand::Status { json } => {
+                    let status = network_guard::status().map_err(std::io::Error::other)?;
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                    } else {
+                        println!("{}", status.render());
+                    }
+                    return Ok(());
+                }
+                NetworkCommand::Checkpoint { confirm_working } => {
+                    network_guard::checkpoint(*confirm_working)
+                }
+                NetworkCommand::Apply { confirm_within } => network_guard::apply(*confirm_within),
+                NetworkCommand::Confirm { id } => network_guard::confirm(id),
+                NetworkCommand::Rollback { id } => network_guard::rollback(id),
+                NetworkCommand::Recover { startup } => {
+                    network_guard::recover(*startup).map_err(std::io::Error::other)?;
+                    return Ok(());
+                }
+                NetworkCommand::Protocol => {
+                    println!("{}", network_guard::PROTOCOL);
+                    return Ok(());
+                }
+            }
+            .map_err(std::io::Error::other)?;
+            println!("{}", report.render());
+            Ok(())
+        }
         Command::Doctor { json, probe } => {
             let path = args
                 .workspace
@@ -279,6 +376,10 @@ fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error:
     }
 }
 
+fn network_target_is_local(args: &Args) -> bool {
+    args.controller.is_none() && args.workspace.is_none() && args.config.is_none()
+}
+
 fn command_help(path: &[String]) -> Result<String, String> {
     let mut root = Args::command();
     root.build();
@@ -310,6 +411,56 @@ fn apply_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_apply_cli_requires_attestation_and_bounds_the_confirmation_window() {
+        assert!(Args::try_parse_from(["mihomo-tui", "network", "checkpoint"]).is_err());
+        assert!(
+            Args::try_parse_from(["mihomo-tui", "network", "checkpoint", "--confirm-working"])
+                .is_ok()
+        );
+        let args = Args::try_parse_from(["mihomo-tui", "network", "apply"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Network {
+                command: NetworkCommand::Apply { confirm_within: 90 }
+            })
+        ));
+        for invalid in ["0", "29", "301"] {
+            assert!(
+                Args::try_parse_from([
+                    "mihomo-tui",
+                    "network",
+                    "apply",
+                    "--confirm-within",
+                    invalid
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_external_or_custom_targets_cannot_manage_local_network_protection() {
+        let args = Args::try_parse_from([
+            "mihomo-tui",
+            "--controller",
+            "http://127.0.0.1:9093",
+            "network",
+            "apply",
+        ])
+        .unwrap();
+        assert!(!network_target_is_local(&args));
+        let args = Args::try_parse_from([
+            "mihomo-tui",
+            "--workspace",
+            "/tmp/config.yaml",
+            "network",
+            "apply",
+        ])
+        .unwrap();
+        assert!(!network_target_is_local(&args));
+    }
 
     #[test]
     fn real_network_probe_is_explicitly_opt_in() {

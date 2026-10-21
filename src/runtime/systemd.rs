@@ -17,7 +17,7 @@ pub(super) const UNIT_PATHS: [&str; 3] = [
     "/usr/lib/systemd/system/mihomo.service",
     "/lib/systemd/system/mihomo.service",
 ];
-pub(super) const MANAGED_DROP_IN: &str = "/etc/systemd/system/mihomo.service.d/10-mihomo-tui.conf";
+pub(crate) const MANAGED_DROP_IN: &str = "/etc/systemd/system/mihomo.service.d/10-mihomo-tui.conf";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnitExpectation {
@@ -115,6 +115,16 @@ fn configure_workspace_service_with_binary(
     if fs::symlink_metadata(drop_in).is_ok() && !trusted_root_file(drop_in) {
         return Err(format!("{} 不是安全的 root 普通文件", drop_in.display()));
     }
+    if fs::symlink_metadata(drop_in).is_ok() {
+        let existing = crate::network_guard::read_service_file(drop_in)?;
+        if std::str::from_utf8(&existing)
+            .ok()
+            .and_then(managed_dropin_binary)
+            .is_none()
+        {
+            return Err("10-mihomo-tui.conf 含未识别内容，拒绝覆盖用户/第三方修改".into());
+        }
+    }
     if fs::read_to_string(drop_in).ok().as_deref() == Some(content.as_str()) {
         return daemon_reload();
     }
@@ -159,7 +169,24 @@ pub(super) fn core_upgrade_restart_command() -> (&'static str, [&'static str; 2]
     )
 }
 
-pub(super) fn workspace_drop_in_content(binary: &Path) -> String {
+pub(crate) fn managed_dropin_binary(content: &str) -> Option<PathBuf> {
+    let value = content
+        .strip_prefix("[Service]\nExecStart=\nExecStart=")?
+        .strip_suffix(" -d /etc/mihomo-tui\n")?;
+    let valid = matches!(
+        value,
+        "/usr/bin/mihomo" | "/usr/local/bin/mihomo" | "/usr/lib/mihomo-tui/current/mihomo"
+    ) || value
+        .strip_prefix("/usr/lib/mihomo-tui/cores/")
+        .and_then(|value| value.strip_suffix("/mihomo"))
+        .is_some_and(|version| {
+            crate::core::CoreVersion::parse(version)
+                .is_ok_and(|parsed| parsed.to_string() == version)
+        });
+    valid.then(|| PathBuf::from(value))
+}
+
+pub(crate) fn workspace_drop_in_content(binary: &Path) -> String {
     format!(
         "[Service]\nExecStart=\nExecStart={} -d /etc/mihomo-tui\n",
         binary.display()
@@ -212,8 +239,14 @@ pub(super) fn validate_systemd_unit_state(
     let absent = state.load_state == "not-found"
         && state.fragment_path.is_none()
         && state.drop_in_paths.is_empty();
-    let managed_drop_ins = state.drop_in_paths.is_empty()
-        || state.drop_in_paths.as_slice() == [PathBuf::from(MANAGED_DROP_IN)];
+    let managed_drop_ins = state.drop_in_paths.iter().all(|path| {
+        path == Path::new(MANAGED_DROP_IN) || path == Path::new(crate::network_guard::HOOK_PATH)
+    }) && state
+        .drop_in_paths
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == state.drop_in_paths.len();
     let packaged = state.load_state == "loaded"
         && managed_drop_ins
         && state.fragment_path.as_deref().is_some_and(|path| {
@@ -264,6 +297,16 @@ pub(super) fn validate_systemd_unit(expectation: UnitExpectation) -> Result<(), 
         .map_err(|_| "systemd 返回的 Mihomo 服务信息不是 UTF-8".to_string())?;
     let state = parse_systemd_unit(&output)?;
     validate_systemd_unit_state(&state, expectation)?;
+    validate_unit_files(&state)
+}
+
+pub(crate) fn validate_guard_unit_output(output: &str) -> Result<(), String> {
+    let state = parse_systemd_unit(output)?;
+    validate_systemd_unit_state(&state, UnitExpectation::Packaged)?;
+    validate_unit_files(&state)
+}
+
+fn validate_unit_files(state: &SystemdUnitState) -> Result<(), String> {
     if let Some(path) = state.fragment_path.as_deref()
         && !trusted_root_file(path)
     {
@@ -279,6 +322,23 @@ pub(super) fn validate_systemd_unit(expectation: UnitExpectation) -> Result<(), 
                 path.display()
             ));
         }
+        if path == Path::new(MANAGED_DROP_IN) {
+            let bytes = crate::network_guard::read_service_file(path)?;
+            if std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(managed_dropin_binary)
+                .is_none()
+            {
+                return Err("已加载的托管 drop-in 包含未知内容，拒绝覆盖或变更核心".into());
+            }
+        }
+    }
+    if state
+        .drop_in_paths
+        .iter()
+        .any(|path| path == Path::new(crate::network_guard::HOOK_PATH))
+    {
+        crate::network_guard::validate_hook()?;
     }
     Ok(())
 }

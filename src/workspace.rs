@@ -23,6 +23,9 @@ pub enum Initialization {
 }
 
 pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization, String> {
+    let _access = crate::network_guard::lock_config_access(source)?;
+    let protected =
+        crate::network_guard::canonical_source(source) && crate::network_guard::status()?.pending();
     if let Ok(metadata) = fs::symlink_metadata(source) {
         if !metadata.file_type().is_file() {
             return Err(format!(
@@ -36,15 +39,25 @@ pub fn initialize(source: &Path, import: Option<&Path>) -> Result<Initialization
                 .as_mapping()
                 .ok_or_else(|| "独立配置根节点必须是映射".to_string())?,
         ) {
+            if protected {
+                return Err("网络保护期间不能迁移配置封装".into());
+            }
             let profile = workspace_profile(&document)?.clone();
             let backup = replace_with_native_profile(source, &profile)?;
             return Ok(Initialization::MigratedWrapper(backup));
         }
         require_mapping(&document, "独立配置")?;
-        restrict_source_permissions(source)?;
+        if !protected {
+            restrict_source_permissions(source)?;
+        }
         return Ok(Initialization::Existing);
     }
 
+    if protected {
+        return Err(
+            "网络保护正在恢复配置，拒绝重新初始化缺失文件；请稍后重开或 network status".into(),
+        );
+    }
     let (profile, result) = match import.filter(|path| fs::symlink_metadata(path).is_ok()) {
         Some(path) => (
             read_raw_profile(path)?,

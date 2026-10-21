@@ -14,6 +14,33 @@ use crate::{
 use std::{fs, path::Path};
 
 #[test]
+fn managed_dropins_are_recognized_by_content_not_just_a_trusted_pathname() {
+    for binary in [
+        "/usr/bin/mihomo",
+        "/usr/local/bin/mihomo",
+        "/usr/lib/mihomo-tui/current/mihomo",
+        "/usr/lib/mihomo-tui/cores/v1.19.29/mihomo",
+    ] {
+        let text = workspace_drop_in_content(Path::new(binary));
+        assert_eq!(
+            super::systemd::managed_dropin_binary(&text).as_deref(),
+            Some(Path::new(binary))
+        );
+        assert!(
+            super::systemd::managed_dropin_binary(&(text + "Environment=USER_SETTING=keep\n"))
+                .is_none()
+        );
+    }
+    assert!(
+        super::systemd::managed_dropin_binary(
+            "[Service]\nExecStart=\nExecStart=/bin/sh -d /etc/mihomo-tui\n"
+        )
+        .is_none()
+    );
+    assert!(super::systemd::managed_dropin_binary("[Service]\nExecStart=\nExecStart=/usr/lib/mihomo-tui/cores/v1/../../other/mihomo -d /etc/mihomo-tui\n").is_none());
+}
+
+#[test]
 fn managed_runtime_accepts_only_tested_core_versions() {
     for version in ["v1.19.28", "v1.19.29"] {
         let output = format!("Mihomo Meta {version} linux amd64 with go1.26.5");

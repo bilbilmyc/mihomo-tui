@@ -24,6 +24,7 @@ pub(super) fn upgrade() -> Result<String, String> {
         return Err(runtime::root_required_message().into());
     }
     let _lock = acquire_runtime_lock()?;
+    crate::network_guard::reject_pending()?;
     let release = CoreRelease::embedded()?;
     let candidate_version = release.recommended();
     let paths = CorePaths::system();

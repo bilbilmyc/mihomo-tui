@@ -71,6 +71,18 @@ pub enum Phase {
 }
 
 impl Phase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Armed => "准备试运行",
+            Self::Trial => "试运行待确认",
+            Self::RollingBack => "正在恢复文件",
+            Self::RestartPending => "等待恢复后的核心启动",
+            Self::Confirmed => "已人工确认",
+            Self::RolledBack => "已恢复并验证启动",
+            Self::Conflict => "冲突，需人工处理",
+            Self::RecoveryFailed => "恢复失败，需检查",
+        }
+    }
     pub fn pending(self) -> bool {
         !matches!(self, Self::Confirmed | Self::RolledBack)
     }

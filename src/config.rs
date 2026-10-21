@@ -822,6 +822,7 @@ pub fn load(path: &Path) -> Result<ConfigSnapshot, String> {
 }
 
 pub fn save_rules(path: &Path, rules: &[ConfigRule]) -> Result<PathBuf, String> {
+    let _edit = crate::network_guard::lock_config_edit(path)?;
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     let root = crate::workspace::config_profile_mut(&mut document)?
@@ -836,6 +837,7 @@ pub fn save_rules(path: &Path, rules: &[ConfigRule]) -> Result<PathBuf, String> 
 }
 
 pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, String> {
+    let _edit = crate::network_guard::lock_config_edit(path)?;
     if name.is_empty()
         || name.len() > 48
         || !name
@@ -935,6 +937,7 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
 }
 
 pub fn remove_provider(path: &Path, name: &str) -> Result<PathBuf, String> {
+    let _edit = crate::network_guard::lock_config_edit(path)?;
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     let root = crate::workspace::config_profile_mut(&mut document)?
@@ -1000,6 +1003,7 @@ pub fn remove_provider(path: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn save_tun_settings(path: &Path, settings: &TunSettings) -> Result<PathBuf, String> {
+    let _edit = crate::network_guard::lock_config_edit(path)?;
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     apply_tun_settings(&mut document, settings)?;
@@ -1007,6 +1011,7 @@ pub fn save_tun_settings(path: &Path, settings: &TunSettings) -> Result<PathBuf,
 }
 
 pub fn save_dns_settings(path: &Path, settings: &DnsSettings) -> Result<PathBuf, String> {
+    let _edit = crate::network_guard::lock_config_edit(path)?;
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
     apply_dns_settings(&mut document, settings)?;

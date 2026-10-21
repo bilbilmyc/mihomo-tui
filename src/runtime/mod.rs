@@ -7,6 +7,7 @@ mod tests;
 use crate::system::{acquire_runtime_lock, effective_root};
 
 pub use install::validate_config;
+pub(crate) use systemd::{MANAGED_DROP_IN, managed_dropin_binary, validate_guard_unit_output};
 pub(crate) use systemd::{
     configure_managed_core_service, restart_service, validate_upgrade_service,
 };
@@ -44,28 +45,25 @@ pub fn plan(mode: RuntimeMode, inventory: Inventory, auto_install: bool) -> Acti
     }
 }
 
-pub fn ensure(mode: RuntimeMode, auto_install: bool) -> Result<(), String> {
-    if mode == RuntimeMode::External {
-        return Ok(());
+pub fn apply_workspace(source: &std::path::Path, auto_install: bool) -> Result<(), String> {
+    if source != std::path::Path::new(crate::workspace::DEFAULT_SOURCE_PATH) {
+        return Err("本机应用只支持规范配置路径".into());
     }
+    if !effective_root() {
+        return Err(root_required_message().into());
+    }
+    let _lock = acquire_runtime_lock()?;
+    crate::network_guard::reject_pending()?;
     let inventory = install::inspect()?;
-    match plan(mode, inventory, auto_install) {
-        Action::None => Ok(()),
-        Action::RejectPartialInstall => Err(partial_install_error(inventory)),
-        Action::Prepare | Action::Install => {
-            if !effective_root() {
-                return Err(root_required_message().into());
-            }
-            let _lock = acquire_runtime_lock()?;
-            let inventory = install::inspect()?;
-            match plan(mode, inventory, auto_install) {
-                Action::None => Ok(()),
-                Action::Prepare => install::prepare_existing_for_apply(),
-                Action::Install => install::install_for_apply(),
-                Action::RejectPartialInstall => Err(partial_install_error(inventory)),
-            }
-        }
+    match plan(RuntimeMode::ManagedLocal, inventory, auto_install) {
+        Action::None => {}
+        Action::Prepare => install::prepare_existing_for_apply()?,
+        Action::Install => install::install_for_apply()?,
+        Action::RejectPartialInstall => return Err(partial_install_error(inventory)),
     }
+    crate::config::validate_for_runtime(source)?;
+    configure_workspace_service(source)?;
+    reload_service()
 }
 
 pub(crate) fn root_required_message() -> &'static str {

@@ -1035,10 +1035,7 @@ impl App {
 
     fn apply_workspace(&mut self) {
         self.apply_workspace_with(|source, auto_install| {
-            crate::runtime::ensure(crate::runtime::RuntimeMode::ManagedLocal, auto_install)
-                .and_then(|()| config::validate_for_runtime(&source))
-                .and_then(|()| crate::runtime::configure_workspace_service(&source))
-                .and_then(|()| reload_mihomo_service())
+            crate::runtime::apply_workspace(&source, auto_install)
         });
     }
 
@@ -1777,9 +1774,6 @@ fn draw_empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str, c
     );
 }
 
-fn reload_mihomo_service() -> Result<(), String> {
-    crate::runtime::reload_service()
-}
 
 fn provider_url_label(raw: &str) -> String {
     let Ok(url) = reqwest::Url::parse(raw) else {
