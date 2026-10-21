@@ -7,6 +7,7 @@ pub enum Page {
     Rules,
     Config,
     Connections,
+    Logs,
     Diagnostics,
 }
 

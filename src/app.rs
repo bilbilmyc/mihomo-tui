@@ -20,6 +20,7 @@ pub struct App {
     last_refresh: Instant,
     connections_view: crate::observability::ConnectionsView,
     diagnostics_view: crate::diagnostics::View,
+    logs_view: crate::observability::LogsView,
     last_connections_refresh: Instant,
     proxy_members_focused: bool,
     selected_proxy_member_index: usize,
@@ -304,6 +305,7 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(10),
             connections_view: crate::observability::ConnectionsView::default(),
             diagnostics_view: crate::diagnostics::View::default(),
+            logs_view: crate::observability::LogsView::default(),
             last_connections_refresh: Instant::now() - Duration::from_secs(10),
             proxy_members_focused: false,
             selected_proxy_member_index: 0,
@@ -346,6 +348,8 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        self.logs_view
+            .sync(self.client.clone(), self.state.page == Page::Logs);
         if self.state.page == Page::Diagnostics && self.diagnostics_view.report.is_none() {
             self.start_diagnostics(false);
         }
@@ -530,6 +534,9 @@ impl App {
         if self.state.page == Page::Connections && self.connections_view.handle_key(key) {
             return false;
         }
+        if self.state.page == Page::Logs && self.logs_view.handle_key(key) {
+            return false;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => true,
             KeyCode::Char('p') => {
@@ -542,7 +549,8 @@ impl App {
                     Page::Proxies => Page::Rules,
                     Page::Rules => Page::Config,
                     Page::Config => Page::Connections,
-                    Page::Connections => Page::Diagnostics,
+                    Page::Connections => Page::Logs,
+                    Page::Logs => Page::Diagnostics,
                     Page::Diagnostics => Page::Dashboard,
                 };
                 self.state.selected = 0;
@@ -570,6 +578,11 @@ impl App {
             KeyCode::Char('4') => {
                 self.state.page = Page::Config;
                 self.state.selected = 0;
+                self.proxy_members_focused = false;
+                false
+            }
+            KeyCode::Char('6') => {
+                self.state.page = Page::Logs;
                 self.proxy_members_focused = false;
                 false
             }
@@ -749,6 +762,7 @@ impl App {
             Page::Config => self.config.providers.len(),
             Page::Connections => 0,
             Page::Diagnostics => 0,
+            Page::Logs => 0,
         };
         if len == 0 {
             return;
@@ -1189,7 +1203,7 @@ impl App {
         ])
         .split(area);
         let tabs = Tabs::new(vec![
-            "1 状态", "2 代理", "3 规则", "4 配置", "5 连接", "7 诊断",
+            "1 状态", "2 代理", "3 规则", "4 配置", "5 连接", "6 日志", "7 诊断",
         ])
         .select(match self.state.page {
             Page::Dashboard => 0,
@@ -1197,7 +1211,8 @@ impl App {
             Page::Rules => 2,
             Page::Config => 3,
             Page::Connections => 4,
-            Page::Diagnostics => 5,
+            Page::Logs => 5,
+            Page::Diagnostics => 6,
         })
         .block(Block::bordered().title(" mihomo-tui 控制台 "))
         .highlight_style(Style::default().fg(Color::Yellow));
@@ -1209,6 +1224,7 @@ impl App {
             Page::Config => self.config(frame, root[1]),
             Page::Connections => self.connections_view.draw(frame, root[1]),
             Page::Diagnostics => self.diagnostics_view.draw(frame, root[1]),
+            Page::Logs => self.logs_view.draw(frame, root[1]),
         }
         if let Some(dialog) = &self.add_provider {
             self.add_provider_dialog(frame, dialog);
@@ -1276,6 +1292,7 @@ impl App {
             (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
             (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  x 删除  r 刷新  p 重启",
             (Page::Connections, _) => "j/k 选择  / 搜索  c 清除搜索  Enter 详情  r 刷新  Tab 页面",
+            (Page::Logs, _) => "j/k 滚动  Space 暂停展示  c 清空缓冲  r 重连  Tab 页面",
             (Page::Diagnostics, _) => {
                 "j/k 滚动  r 只读检查  g HTTPS探测github.com（联网） Tab 页面"
             }
@@ -2912,6 +2929,21 @@ rules:
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn logs_page_supports_pause_and_tab_navigation_at_eighty_columns() {
+        let mut app = App::new(None, None, None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        assert_eq!(app.state.page, Page::Logs);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("实时日志"), "{screen}");
+        assert!(screen.contains("暂停展示"), "{screen}");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.state.page, Page::Diagnostics);
     }
 
     #[test]

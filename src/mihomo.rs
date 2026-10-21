@@ -4,7 +4,11 @@ use crate::{
 };
 use reqwest::blocking::Client;
 use serde_json::Value;
-use std::{collections::BTreeMap, io::Read, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read},
+    time::Duration,
+};
 
 const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 const DELAY_TIMEOUT_MS: u64 = 5_000;
@@ -110,6 +114,52 @@ impl MihomoClient {
             }
         }
         Ok(snapshot)
+    }
+
+    pub fn log_stream(
+        &self,
+        cancelled: impl Fn() -> bool,
+        mut receive: impl FnMut(crate::observability::LogEntry),
+    ) -> Result<(), String> {
+        if cancelled() {
+            return Ok(());
+        }
+        let response = self
+            .request(
+                self.http
+                    .get(format!("{}/logs?level=info", self.base_url))
+                    .timeout(Duration::from_secs(3)),
+            )
+            .send()
+            .map_err(|_| "日志流空闲、超时或无法连接（未收到数据不等于故障）".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("日志接口返回 HTTP {}", response.status().as_u16()));
+        }
+        let mut reader = BufReader::new(response);
+        while !cancelled() {
+            let mut line = Vec::new();
+            let count = Read::by_ref(&mut reader)
+                .take(16 * 1024 + 1)
+                .read_until(b'\n', &mut line)
+                .map_err(|_| "日志读取结束或超时".to_string())?;
+            if count == 0 {
+                return Ok(());
+            }
+            if count > 16 * 1024 {
+                return Err("日志单行超过 16 KiB，已断开该流".into());
+            }
+            if cancelled() {
+                return Ok(());
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            receive(crate::observability::LogEntry::parse(
+                &line,
+                self.secret.as_deref(),
+            )?);
+        }
+        Ok(())
     }
 
     pub fn proxies(&self) -> Result<Vec<ProxySummary>, String> {
@@ -371,6 +421,82 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    fn log_fixture(body: String) -> (MihomoClient, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            assert!(request.starts_with("GET /logs?level=info HTTP/1.1"));
+            assert!(
+                request
+                    .to_lowercase()
+                    .contains("authorization: bearer fixture-secret")
+            );
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        (
+            MihomoClient::new(format!("http://{address}"), Some("fixture-secret".into())).unwrap(),
+            server,
+        )
+    }
+
+    #[test]
+    fn log_stream_reads_lines_and_cancels_without_replaying_the_remaining_body() {
+        let (client, server) = log_fixture(
+            concat!(
+                "{\"type\":\"info\",\"payload\":\"fixture-secret\"}\n",
+                "{\"type\":\"warning\",\"payload\":\"second\"}\n"
+            )
+            .into(),
+        );
+        let cancelled = std::cell::Cell::new(false);
+        let mut entries = Vec::new();
+        client
+            .log_stream(
+                || cancelled.get(),
+                |entry| {
+                    entries.push(entry);
+                    cancelled.set(true);
+                },
+            )
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].payload.contains("fixture-secret"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_log_lines_are_rejected_with_no_raw_body_in_the_error() {
+        let (client, server) = log_fixture("x".repeat(17 * 1024));
+        let error = client
+            .log_stream(|| false, |_| panic!("oversized line must not be delivered"))
+            .unwrap_err();
+        assert!(error.contains("16 KiB"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_log_subscription_never_attempts_a_request() {
+        let client = MihomoClient::new("http://127.0.0.1:1", None).unwrap();
+        client
+            .log_stream(|| true, |_| panic!("cancelled stream"))
+            .unwrap();
+    }
 
     #[test]
     fn connection_snapshots_use_header_auth_and_never_display_the_secret() {
