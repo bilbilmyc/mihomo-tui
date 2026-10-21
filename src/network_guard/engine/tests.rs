@@ -290,3 +290,90 @@ fn unsupported_binding_inspection_is_persisted_as_conflict_and_transient_failure
     assert_eq!(state.attempts, 3);
     assert_eq!(g.engine.host.restarts, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn insecure_or_symlinked_source_directories_are_rejected_before_the_first_trial() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for symlinked in [false, true] {
+        let mut f = fixture();
+        let original_checkpoint = f.engine.store.load().unwrap().checkpoint;
+        let real = f.root.join("source");
+        store::private_directory(&real).unwrap();
+        let source = real.join("config.yaml");
+        std::fs::rename(&f.engine.source, &source).unwrap();
+        f.engine.source = if symlinked {
+            let link = f.root.join("source-link");
+            symlink(&real, &link).unwrap();
+            link.join("config.yaml")
+        } else {
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+            source
+        };
+        let applied = f.engine.apply(90);
+        let checkpointed = f.engine.checkpoint();
+        assert!(applied.is_err(), "unsafe parent accepted for trial");
+        assert!(
+            checkpointed.is_err(),
+            "unsafe parent accepted as a baseline"
+        );
+        assert!(!f.engine.host.armed);
+        assert_eq!(f.engine.host.restarts, 0);
+        assert_eq!(
+            f.engine.store.load().unwrap().checkpoint,
+            original_checkpoint
+        );
+        assert!(!f.engine.store.load().unwrap().pending());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_or_replaced_source_entries_record_a_conflict_without_retrying_or_overwriting() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for replacement in ["permissions", "symlink", "fifo"] {
+        let mut f = fixture();
+        let tx = f.engine.apply(90).unwrap().transaction.unwrap();
+        f.engine.host.now.uptime_ms = tx.deadline_uptime_ms;
+        if replacement == "permissions" {
+            std::fs::set_permissions(&f.engine.source, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        } else {
+            std::fs::remove_file(&f.engine.source).unwrap();
+            if replacement == "symlink" {
+                symlink(
+                    f.engine.store.snapshot_path(&tx.candidate.id).unwrap(),
+                    &f.engine.source,
+                )
+                .unwrap();
+            } else {
+                assert!(
+                    std::process::Command::new("/usr/bin/mkfifo")
+                        .args(["-m", "600"])
+                        .arg(&f.engine.source)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&f.engine.source).unwrap();
+        assert!(f.engine.recover(None, false, false).is_err());
+        let failed = f.engine.store.load().unwrap().transaction.unwrap();
+        assert_eq!(failed.phase, Phase::Conflict);
+        assert!(failed.last_error.is_some());
+        for _ in 0..4 {
+            assert!(f.engine.recover(None, false, false).is_ok());
+        }
+        let after = f.engine.store.load().unwrap().transaction.unwrap();
+        assert_eq!(after.phase, Phase::Conflict);
+        assert_eq!(after.attempts, failed.attempts);
+        assert_eq!(f.engine.host.restarts, 1);
+        assert_eq!(
+            std::fs::symlink_metadata(&f.engine.source)
+                .unwrap()
+                .file_type(),
+            metadata.file_type()
+        );
+    }
+}

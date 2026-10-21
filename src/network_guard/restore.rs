@@ -36,6 +36,7 @@ impl From<String> for Failure {
 }
 
 pub fn read_source(source: &Path) -> Result<Option<Vec<u8>>, String> {
+    source_directory(source)?;
     match fs::symlink_metadata(source) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err("无法检查规范配置".into()),
@@ -43,14 +44,19 @@ pub fn read_source(source: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-pub fn paths(source: &Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
-    if !hex_id(id, 32) {
-        return Err("恢复事务 ID 无效".into());
-    }
+fn source_directory(source: &Path) -> Result<&Path, String> {
     let parent = source.parent().ok_or("规范配置缺少父目录")?;
     if !crate::system::trusted_root_directory(parent) {
         return Err("规范配置目录不安全".into());
     }
+    Ok(parent)
+}
+
+pub fn paths(source: &Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
+    if !hex_id(id, 32) {
+        return Err("恢复事务 ID 无效".into());
+    }
+    let parent = source_directory(source)?;
     Ok((
         parent.join(format!(".mihomo-tui-guard-{id}.old")),
         parent.join(format!(".mihomo-tui-guard-{id}.new")),

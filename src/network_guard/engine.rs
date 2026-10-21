@@ -286,7 +286,10 @@ impl<B: Backend> Engine<B> {
             self.host.arm(false)?;
             tx.attempts = 0;
         }
-        let source_hash = restore::read_source(&self.source)?.as_deref().map(digest);
+        let source_hash = match restore::read_source(&self.source) {
+            Ok(source) => source.as_deref().map(digest),
+            Err(error) => return self.fail(&mut ledger, &mut tx, true, &error),
+        };
         if tx.phase == Phase::RestartPending
             && source_hash.as_deref() == Some(tx.baseline.sha256.as_str())
             && let Some(witness) = &tx.rollback_witness

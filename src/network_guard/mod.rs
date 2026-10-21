@@ -230,14 +230,6 @@ pub fn recover(startup: bool) -> Result<(), String> {
         return Ok(());
     }
     let mut host = Host::new(store.clone())?;
-    if !startup
-        && ledger.transaction.as_ref().is_some_and(|tx| {
-            tx.phase == Phase::Conflict || (tx.phase == Phase::RecoveryFailed && tx.attempts >= 3)
-        })
-    {
-        let _ = host.disarm();
-        return Ok(());
-    }
     let observed_id = ledger.transaction.as_ref().map(|tx| tx.id.clone());
     let incompatible = host.compatible().err().map(BindingError::Conflict);
     if startup
@@ -263,6 +255,11 @@ pub fn recover(startup: bool) -> Result<(), String> {
         } else {
             Ok(())
         };
+    }
+    // Mutating the timer requires the same lock and a fresh phase check as manual rollback.
+    // A worker's initial observation may already have been superseded while it waited.
+    if !startup && disarm_if_paused(&store, || host.disarm())? {
+        return Ok(());
     }
     let mut engine = Engine {
         store: store.clone(),
@@ -319,12 +316,22 @@ fn finish_recovery(
     engine: &mut Engine<Host>,
     result: Result<Ledger, String>,
 ) -> Result<(), String> {
-    if engine.store.load()?.transaction.as_ref().is_some_and(|tx| {
+    disarm_if_paused(&engine.store, || engine.host.disarm())?;
+    result.map(|_| ())
+}
+
+/// The caller holds the shared runtime mutation lock throughout this check and timer update.
+fn disarm_if_paused(
+    store: &Store,
+    disarm: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if store.load()?.transaction.as_ref().is_some_and(|tx| {
         tx.phase == Phase::Conflict || (tx.phase == Phase::RecoveryFailed && tx.attempts >= 3)
     }) {
-        let _ = engine.host.disarm();
+        disarm()?;
+        return Ok(true);
     }
-    result.map(|_| ())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -362,5 +369,41 @@ pub(crate) fn test_status(phase: Phase) -> Status {
             None
         },
         ledger: Some(Box::new(ledger)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_pause_observations_cannot_disarm_a_manually_resumed_transaction() {
+        let root = store::tests::directory();
+        let store = Store::initialize(&root).unwrap();
+        let mut paused = *test_status(Phase::Conflict).ledger.unwrap();
+        store.save(&paused).unwrap();
+        let stale = store.load().unwrap();
+        assert_eq!(stale.transaction.as_ref().unwrap().phase, Phase::Conflict);
+        // A manual rollback acquired the shared mutation lock first and resumed the same ID.
+        paused.transaction.as_mut().unwrap().phase = Phase::RollingBack;
+        store.save(&paused).unwrap();
+        let disabled = std::cell::Cell::new(false);
+        let handled = disarm_if_paused(&store, || {
+            disabled.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!handled && !disabled.get());
+        paused.transaction.as_mut().unwrap().phase = Phase::Conflict;
+        store.save(&paused).unwrap();
+        assert!(
+            disarm_if_paused(&store, || {
+                disabled.set(true);
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert!(disabled.get());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
