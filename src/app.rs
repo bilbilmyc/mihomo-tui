@@ -1263,6 +1263,9 @@ impl App {
     }
 
     fn shortcut_help(&self) -> &'static str {
+        if self.state.page == Page::Connections && self.connections_view.filtering {
+            return "输入过滤词  Backspace 删除  Enter/Esc 结束搜索  Ctrl+C 退出";
+        }
         if self.delete_provider.is_some() {
             return "y 确认删除  n/Esc 取消  Ctrl+C 退出";
         }
@@ -2823,7 +2826,15 @@ mod tests {
     #[test]
     fn context_shortcuts_fit_an_eighty_column_terminal() {
         let mut app = App::new(None, None, None);
-        for page in [Page::Dashboard, Page::Proxies, Page::Rules, Page::Config] {
+        for page in [
+            Page::Dashboard,
+            Page::Proxies,
+            Page::Rules,
+            Page::Config,
+            Page::Connections,
+            Page::Logs,
+            Page::Diagnostics,
+        ] {
             app.state.page = page;
             app.proxy_members_focused = false;
             assert!(Line::from(app.shortcut_help()).width() <= 78);
@@ -2831,6 +2842,44 @@ mod tests {
         app.state.page = Page::Proxies;
         app.proxy_members_focused = true;
         assert!(Line::from(app.shortcut_help()).width() <= 78);
+    }
+
+    #[test]
+    fn slow_connection_requests_never_block_navigation_or_duplicate_in_flight_work() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.starts_with("GET /connections "));
+            thread::sleep(Duration::from_millis(300));
+            let body = r#"{"connections":[]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mut app = App::new(Some(format!("http://{address}")), None, None);
+        let start = Instant::now();
+        app.refresh_connections(true);
+        app.refresh_connections(true);
+        app.handle_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert_eq!(app.state.page, Page::Diagnostics);
+        server.join().unwrap();
+        for _ in 0..100 {
+            app.process_worker_results();
+            if !app.connections_view.loading {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.connections_view.snapshot.is_some());
     }
 
     fn provider_test_config(label: &str) -> (PathBuf, PathBuf) {

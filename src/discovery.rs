@@ -30,7 +30,7 @@ fn read_config(path: &Path) -> Option<ConnectionInfo> {
     })
 }
 
-fn normalize_controller(value: &str) -> String {
+pub(crate) fn normalize_controller(value: &str) -> String {
     let value = value.trim().trim_matches('\'');
     if let Some(port) = value.strip_prefix("0.0.0.0:") {
         return format!("http://127.0.0.1:{port}");

@@ -20,6 +20,27 @@ pub struct Options {
     pub external: bool,
 }
 
+pub fn client_for(
+    path: &Path,
+    controller: Option<String>,
+    secret: Option<String>,
+) -> Option<MihomoClient> {
+    if let Some(controller) = controller {
+        // Explicit endpoints never inherit a different host's credentials.
+        return MihomoClient::new(controller, secret).ok();
+    }
+    let config = read_configuration(path).ok()?;
+    let controller =
+        crate::discovery::normalize_controller(config.get("external-controller")?.as_str()?);
+    let secret = secret.or_else(|| {
+        config
+            .get("secret")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    MihomoClient::new(controller, secret).ok()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub schema_version: u8,
@@ -133,8 +154,13 @@ pub fn collect(options: &Options) -> Report {
     report.checks.push(Check::new(
         "coverage",
         Status::Warning,
-        "未验证 IPv6、DNS 解析路径或持续运行健康；真实请求需显式探测",
+        "未验证 IPv6、DNS 解析路径或持续运行健康；一次探测也不代表持续健康",
     ));
+    if let Some(client) = &options.client {
+        for check in &mut report.checks {
+            check.detail = client.redact(&check.detail);
+        }
+    }
     report
 }
 
@@ -213,20 +239,29 @@ fn collect_host(report: &mut Report, configuration: Option<&Value>, runtime: Opt
         ));
         return;
     }
+    let device_node_exists = Path::new("/dev/net/tun").exists();
     report.checks.push(Check::new(
         "tun_device_node",
-        if Path::new("/dev/net/tun").exists() {
+        if device_node_exists {
             Status::Pass
         } else {
             Status::Unknown
         },
-        "检查 /dev/net/tun 是否存在；存在不代表权限/虚拟化允许创建网卡",
+        if device_node_exists {
+            "/dev/net/tun 存在；不代表权限/虚拟化允许创建网卡"
+        } else {
+            "未检测到 /dev/net/tun；请检查设备节点与权限"
+        },
     ));
     if tun.get("auto-route").and_then(Value::as_bool) != Some(true) {
         report.checks.push(Check::new(
             "tun_routes",
-            Status::NotApplicable,
-            "未启用 auto-route，不判断用户手动路由的完整性",
+            if tun.get("auto-route").and_then(Value::as_bool) == Some(false) {
+                Status::NotApplicable
+            } else {
+                Status::Unknown
+            },
+            "auto-route 未确认开启，不判断用户手动路由的完整性",
         ));
         return;
     }
@@ -369,6 +404,11 @@ impl Check {
 }
 
 fn read_configuration(path: &Path) -> Result<Value, String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| "无法只读打开配置，请检查路径与权限")?;
+    if !metadata.is_file() {
+        return Err("诊断配置来源必须是普通文件，不跟随符号链接或读取设备/管道".into());
+    }
     let mut content = String::new();
     File::open(path)
         .and_then(|file| file.take(2 * 1024 * 1024 + 1).read_to_string(&mut content))
@@ -378,7 +418,8 @@ fn read_configuration(path: &Path) -> Result<Value, String> {
     }
     let document: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|_| "配置 YAML 无法解析（原文已隐藏）".to_string())?;
-    let profile = crate::workspace::config_profile(&document)?;
+    let profile = crate::workspace::config_profile(&document)
+        .map_err(|_| "独立配置封装不可识别（原文字段已隐藏）".to_string())?;
     if !profile.is_mapping() {
         return Err("配置根节点不是映射".into());
     }

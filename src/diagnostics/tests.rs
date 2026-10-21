@@ -2,6 +2,48 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn configuration_errors_do_not_echo_untrusted_wrapper_fields() {
+    let path =
+        std::env::temp_dir().join(format!("mihomo-doctor-invalid-{}.yaml", std::process::id()));
+    std::fs::write(
+        &path,
+        "kind: mihomo-tui/v1\nbackend: fixture-secret\nprofile: {}\n",
+    )
+    .unwrap();
+    let error = read_configuration(&path).unwrap_err();
+    std::fs::remove_file(path).unwrap();
+    assert!(!error.contains("fixture-secret"));
+}
+
+#[test]
+fn explicit_controllers_do_not_inherit_local_configuration_secrets() {
+    let path = std::env::temp_dir().join(format!(
+        "mihomo-doctor-credentials-{}.yaml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "external-controller: 127.0.0.1:9090\nsecret: saved-secret\n",
+    )
+    .unwrap();
+    let client = client_for(&path, Some("http://127.0.0.1:9093".into()), None).unwrap();
+    assert_eq!(client.redact("saved-secret"), "saved-secret");
+    let local = client_for(&path, None, None).unwrap();
+    assert!(!local.redact("saved-secret").contains("saved-secret"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostics_refuse_non_regular_config_sources() {
+    let path = std::env::temp_dir().join(format!("mihomo-doctor-link-{}", std::process::id()));
+    std::os::unix::fs::symlink("/dev/null", &path).unwrap();
+    let result = read_configuration(&path);
+    std::fs::remove_file(path).unwrap();
+    assert!(result.unwrap_err().contains("普通文件"));
+}
+
+#[test]
 fn external_controller_does_not_inspect_local_services_or_create_configuration() {
     let path = std::env::temp_dir().join("mihomo-doctor-external-missing/config.yaml");
     let report = collect(&Options {

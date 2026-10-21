@@ -41,6 +41,11 @@ const TOP_LEVEL_AFTER_HELP: &str = r#"快速开始：
   mihomo-tui core status          查看当前、已安装、推荐及兼容版本
   sudo mihomo-tui core upgrade   显式升级托管内核，失败时自动回滚
 
+只读排查：
+  sudo mihomo-tui doctor         检查 Controller、服务和 IPv4 TUN 路由
+  sudo mihomo-tui doctor --json  输出结构化报告，不自动修复
+  sudo mihomo-tui doctor --probe 显式探测 github.com 并观察目标连接
+
 完整服务器说明：
   /usr/share/doc/mihomo-tui/server-guide.md
   源码仓库中的 docs/server-guide.md"#;
@@ -62,7 +67,7 @@ const CORE_UPGRADE_AFTER_HELP: &str = r#"升级要求 root 权限、受信任的
     name = "mihomo-tui",
     version,
     about = "通过 SSH 管理 Mihomo 的终端控制中心",
-    long_about = "mihomo-tui 是面向 Linux 服务器的 Mihomo 终端控制中心。\n不带子命令时启动 TUI；也可以只连接已有 Controller，或显式检查和升级托管内核。",
+    long_about = "mihomo-tui 是面向 Linux 服务器的 Mihomo 终端控制中心。\n不带子命令时启动 TUI；doctor 只读排查网络，也可以只连接已有 Controller，或显式检查和升级托管内核。",
     after_help = TOP_LEVEL_AFTER_HELP,
     help_template = COMMAND_HELP_TEMPLATE,
     override_usage = "mihomo-tui [选项] [命令]",
@@ -230,16 +235,8 @@ fn run_command(command: &Command, args: &Args) -> Result<(), Box<dyn std::error:
                 .or_else(|| args.config.clone())
                 .unwrap_or_else(|| PathBuf::from(workspace::DEFAULT_SOURCE_PATH));
             let external = args.controller.is_some();
-            let discovered = (!external).then(|| discovery::discover(&path)).flatten();
-            let controller = args
-                .controller
-                .clone()
-                .or_else(|| discovered.as_ref().map(|info| info.controller.clone()));
-            let secret = args
-                .secret
-                .clone()
-                .or_else(|| discovered.and_then(|info| info.secret));
-            let client = controller.and_then(|url| mihomo::MihomoClient::new(url, secret).ok());
+            let client =
+                diagnostics::client_for(&path, args.controller.clone(), args.secret.clone());
             let report = diagnostics::collect_with_probe(
                 &diagnostics::Options {
                     path,

@@ -175,14 +175,7 @@ impl MihomoClient {
     }
 
     pub fn version(&self) -> Result<CoreVersion, String> {
-        let response = self
-            .request(self.http.get(format!("{}/version", self.base_url)))
-            .send()
-            .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("Mihomo returned {}", response.status()));
-        }
-        let body: Value = response.json().map_err(|error| error.to_string())?;
+        let body = self.read_json("/version")?;
         let version = body
             .get("version")
             .and_then(Value::as_str)
@@ -421,6 +414,29 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn read_only_json_responses_have_a_hard_size_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.starts_with("GET /configs "));
+            let body = " ".repeat(4 * 1024 * 1024 + 10);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let client = MihomoClient::new(format!("http://{address}"), None).unwrap();
+        assert!(client.runtime_config().unwrap_err().contains("4 MiB"));
+        server.join().unwrap();
+    }
 
     fn log_fixture(body: String) -> (MihomoClient, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

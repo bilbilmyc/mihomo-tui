@@ -43,6 +43,7 @@ impl LogEntry {
     }
 }
 
+#[derive(Debug)]
 enum LogEvent {
     Entry(LogEntry),
     State(String),
@@ -227,13 +228,38 @@ impl LogsView {
     }
 }
 
+#[derive(Default)]
+struct IdleBudget {
+    epoch: u64,
+    failures: usize,
+}
+
+impl IdleBudget {
+    fn record(&mut self, epoch: u64, received: bool) {
+        if self.epoch != epoch {
+            self.epoch = epoch;
+            self.failures = 0;
+        }
+        self.failures = if received { 0 } else { self.failures + 1 };
+    }
+
+    fn exhausted(&self, epoch: u64) -> bool {
+        self.epoch == epoch && self.failures >= 3
+    }
+}
+
 fn log_worker(client: MihomoClient, signals: Arc<Signals>, sender: SyncSender<(u64, LogEvent)>) {
+    let mut budget = IdleBudget::default();
     while !signals.stop.load(Ordering::Relaxed) {
         if !signals.active.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(50));
             continue;
         }
         let epoch = signals.epoch.load(Ordering::Relaxed);
+        if budget.exhausted(epoch) {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         let cancelled = || {
             signals.stop.load(Ordering::Relaxed)
                 || !signals.active.load(Ordering::Relaxed)
@@ -244,8 +270,19 @@ fn log_worker(client: MihomoClient, signals: Arc<Signals>, sender: SyncSender<(u
                 signals.dropped.fetch_add(1, Ordering::Relaxed);
             }
         };
-        let result = client.log_stream(cancelled, |entry| send(LogEvent::Entry(entry)));
+        let received = std::cell::Cell::new(false);
+        let result = client.log_stream(cancelled, |entry| {
+            received.set(true);
+            send(LogEvent::Entry(entry));
+        });
         if !cancelled() {
+            budget.record(epoch, received.get());
+            if budget.exhausted(epoch) {
+                send(LogEvent::State(
+                    "连续3次未收到日志或连接失败，已暂停自动重连；按 r 重试".into(),
+                ));
+                continue;
+            }
             send(LogEvent::State(match result {
                 Ok(()) => "日志流已结束，稍后重新订阅（不补历史）".into(),
                 Err(error) => format!("{error}；稍后重连，期间可能遗漏日志"),
@@ -318,5 +355,32 @@ mod tests {
         let signals = view.signals.clone();
         drop(view);
         assert!(signals.stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_transport_queue_is_bounded_even_when_the_terminal_does_not_drain_it() {
+        let view = LogsView::default();
+        for _ in 0..QUEUE_SIZE {
+            view.tx
+                .try_send((0, LogEvent::State("fixture".into())))
+                .unwrap();
+        }
+        assert!(matches!(
+            view.tx.try_send((0, LogEvent::State("overflow".into()))),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn quiet_or_failing_streams_have_a_finite_retry_budget_per_subscription() {
+        let mut budget = IdleBudget::default();
+        for _ in 0..3 {
+            budget.record(1, false);
+        }
+        assert!(budget.exhausted(1));
+        assert!(!budget.exhausted(2));
+        budget.record(2, false);
+        budget.record(2, true);
+        assert!(!budget.exhausted(2));
     }
 }
