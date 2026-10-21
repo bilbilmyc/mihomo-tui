@@ -370,11 +370,27 @@ impl Host {
         Ok(true)
     }
 
+    fn verify_recovery_execution(&self) -> Result<(), String> {
+        ctl(&["start", units::SERVICE])?;
+        let result = ctl(&[
+            "show",
+            units::SERVICE,
+            "--property=Result",
+            "--property=ExecMainStatus",
+        ])?;
+        let info = properties(&result);
+        if info.get("Result") != Some(&"success") || info.get("ExecMainStatus") != Some(&"0") {
+            return Err("恢复单元执行验证未通过，未安装新的启动 hook".into());
+        }
+        Ok(())
+    }
+
     pub fn bootstrap(&mut self) -> Result<(), String> {
         let mut ledger = self.store.load()?;
         if ledger.pending() {
             return Err("不能在未解决事务期间替换恢复程序".into());
         }
+        validate_hook()?;
         let (binary, _) = core_info()?;
         let (ok, version) = run(&binary, &["-v"], 5)?;
         if !ok {
@@ -396,6 +412,7 @@ impl Host {
             Self::known_unit(units::TIMER, units::TIMER_PATH, &units::timer_content())?;
         if fs::symlink_metadata(units::WORKER).is_ok() {
             let old = worker_hash()?;
+            replacement_allowed(Path::new(units::HOOK_PATH).exists(), &old, &self.image_hash)?;
             if old != self.image_hash && ledger.worker_sha256.as_deref() != Some(&old) {
                 return Err("私有恢复路径含未知程序，未替换".into());
             }
@@ -431,10 +448,16 @@ impl Host {
             std::io::copy(&mut source.take(BINARY_LIMIT as u64 + 1), &mut target)
                 .map_err(|_| "无法复制恢复程序")?;
             target.sync_all().map_err(|_| "无法同步恢复程序")?;
+            drop(target);
             if hash_handle(store::open_private(&temporary, BINARY_LIMIT, false)?)?
                 != self.image_hash
             {
                 return Err("恢复程序副本校验失败".into());
+            }
+            let executable = run(&temporary, &["network", "_protocol"], 2);
+            if !executable.is_ok_and(|(ok, output)| ok && output.trim() == PROTOCOL.to_string()) {
+                let _ = fs::remove_file(&temporary);
+                return Err("私有目录不允许执行恢复程序，未发布程序或挂接启动 hook".into());
             }
             fs::rename(&temporary, units::WORKER).map_err(|_| "无法安装私有恢复程序")?;
             store::sync_dir(&self.store.root)?;
@@ -446,11 +469,33 @@ impl Host {
             &units::service_content(units::WORKER),
         )?;
         install_unit(Path::new(units::TIMER_PATH), &units::timer_content())?;
-        install_unit(Path::new(units::HOOK_PATH), &units::hook_content())?;
         ctl(&["daemon-reload"])?;
-        validate_hook()?;
+        self.compatible()?;
+        protect_startup_hook(
+            || self.verify_recovery_execution(),
+            || {
+                install_unit(Path::new(units::HOOK_PATH), &units::hook_content())?;
+                ctl(&["daemon-reload"])?;
+                validate_hook()
+            },
+        )?;
         self.compatible()
     }
+}
+
+fn replacement_allowed(hook_exists: bool, previous: &str, current: &str) -> Result<(), String> {
+    if hook_exists && previous != current {
+        return Err("首版不会跨构建替换已挂接的恢复程序；请使用现有私有 worker 操作，升级设施需在维护窗口完成".into());
+    }
+    Ok(())
+}
+
+fn protect_startup_hook(
+    probe: impl FnOnce() -> Result<(), String>,
+    publish: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    probe()?;
+    publish()
 }
 
 fn install_unit(path: &Path, expected: &str) -> Result<(), String> {
@@ -532,17 +577,7 @@ impl Backend for Host {
         )?;
         Self::known_unit(units::TIMER, units::TIMER_PATH, &units::timer_content())?;
         if new_trial {
-            ctl(&["start", units::SERVICE])?;
-            let result = ctl(&[
-                "show",
-                units::SERVICE,
-                "--property=Result",
-                "--property=ExecMainStatus",
-            ])?;
-            let info = properties(&result);
-            if info.get("Result") != Some(&"success") || info.get("ExecMainStatus") != Some(&"0") {
-                return Err("恢复单元执行验证未通过".into());
-            }
+            self.verify_recovery_execution()?;
         }
         ctl(&["enable", "--now", units::TIMER])?;
         let timer = ctl(&[
@@ -573,6 +608,26 @@ impl Backend for Host {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_execution_probe_cannot_publish_a_new_startup_hook() {
+        let published = std::cell::Cell::new(false);
+        let result = super::protect_startup_hook(
+            || Err("noexec or policy denied execution".into()),
+            || {
+                published.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!published.get());
+    }
+
+    #[test]
+    fn an_already_attached_worker_is_not_replaced_by_a_different_build() {
+        assert!(super::replacement_allowed(true, "old", "new").is_err());
+        assert!(super::replacement_allowed(true, "same", "same").is_ok());
+        assert!(super::replacement_allowed(false, "old", "new").is_ok());
+    }
     #[test]
     fn command_waits_are_bounded_without_touching_systemd() {
         let started = std::time::Instant::now();
