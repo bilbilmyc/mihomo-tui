@@ -40,12 +40,27 @@ pub struct App {
     delay_probe_in_flight: bool,
     proxy_selection_in_flight: bool,
     apply_in_flight: bool,
+    guard_status: Option<crate::network_guard::Status>,
+    guard_error: Option<String>,
+    guard_dialog: bool,
+    guard_generation: u64,
+    guard_action_in_flight: bool,
+    guard_read_in_flight: bool,
+    guard_sampled_at: Instant,
+    last_guard_refresh: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigReload {
     None,
     LocalSystemd,
+}
+
+#[derive(Clone)]
+enum GuardAction {
+    Apply,
+    Confirm(String),
+    Rollback(String),
 }
 
 #[derive(Default)]
@@ -239,6 +254,11 @@ enum WorkerResult {
         result: Result<ProviderRefreshData, String>,
     },
     ConfigApplied(Result<(), String>),
+    GuardStatus {
+        generation: u64,
+        action: bool,
+        result: Result<crate::network_guard::Status, String>,
+    },
     Connections(Result<crate::observability::ConnectionSnapshot, String>),
     Diagnostics(crate::diagnostics::Report),
 }
@@ -325,6 +345,14 @@ impl App {
             delay_probe_in_flight: false,
             proxy_selection_in_flight: false,
             apply_in_flight: false,
+            guard_status: None,
+            guard_error: None,
+            guard_dialog: false,
+            guard_generation: 0,
+            guard_action_in_flight: false,
+            guard_read_in_flight: false,
+            guard_sampled_at: Instant::now(),
+            last_guard_refresh: Instant::now() - Duration::from_secs(2),
         }
     }
 
@@ -348,6 +376,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        self.refresh_guard_status();
         self.logs_view
             .sync(self.client.clone(), self.state.page == Page::Logs);
         if self.state.page == Page::Diagnostics && self.diagnostics_view.report.is_none() {
@@ -373,6 +402,69 @@ impl App {
     fn process_worker_results(&mut self) {
         while let Ok(message) = self.worker_rx.try_recv() {
             match message {
+                WorkerResult::GuardStatus {
+                    generation,
+                    action,
+                    result,
+                } => {
+                    if action {
+                        self.guard_action_in_flight = false;
+                    } else {
+                        self.guard_read_in_flight = false;
+                    }
+                    if generation != self.guard_generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(status) => {
+                            let changed = self.guard_status.as_ref().and_then(|old| old.id())
+                                != status.id()
+                                || self.guard_status.as_ref().and_then(|old| old.phase())
+                                    != status.phase();
+                            if status.pending() && (action || changed) {
+                                self.guard_dialog = true;
+                            }
+                            if !status.pending() {
+                                self.guard_dialog = false;
+                            }
+                            if action || changed {
+                                self.guard_error = None;
+                            }
+                            if action {
+                                self.state.status =
+                                    "保护操作已提交；以持久事务状态为准，API 成功不会自动确认"
+                                        .into();
+                            }
+                            if changed
+                                && matches!(
+                                    status.phase(),
+                                    Some(
+                                        crate::network_guard::Phase::Confirmed
+                                            | crate::network_guard::Phase::RolledBack
+                                    )
+                                )
+                            {
+                                if let Some(path) = &self.config_path
+                                    && let Ok(snapshot) = config::load(path)
+                                {
+                                    // Keep unsaved rule edits in AppState; only refresh the disk-backed configuration snapshot.
+                                    self.config = snapshot;
+                                }
+                                self.reload_pending = false;
+                                self.last_refresh = Instant::now() - Duration::from_secs(10);
+                            }
+                            self.guard_sampled_at = Instant::now();
+                            self.guard_status = Some(status);
+                        }
+                        Err(error) => {
+                            let message = crate::sanitize::text(&error, None);
+                            self.guard_error = Some(message.clone());
+                            if action {
+                                self.state.status = format!("保护操作失败：{message}");
+                            }
+                        }
+                    }
+                }
                 WorkerResult::Diagnostics(report) => {
                     self.diagnostics_view.loading = false;
                     self.diagnostics_view.report = Some(report);
@@ -511,6 +603,16 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
         }
+        if self.guard_dialog {
+            match key.code {
+                KeyCode::Char('C') => self.confirm_guard(),
+                KeyCode::Char('B') => self.rollback_guard(),
+                KeyCode::Esc => self.guard_dialog = false,
+                KeyCode::Char('q') => return true,
+                _ => {}
+            }
+            return false;
+        }
         if self.settings_dialog.is_some() {
             return self.handle_settings_key(key);
         }
@@ -538,6 +640,28 @@ impl App {
             return false;
         }
         match key.code {
+            KeyCode::Char('P') => {
+                self.start_guard_action(GuardAction::Apply);
+                false
+            }
+            KeyCode::Char('C')
+                if self
+                    .guard_status
+                    .as_ref()
+                    .is_some_and(|status| status.pending()) =>
+            {
+                self.confirm_guard();
+                false
+            }
+            KeyCode::Char('B')
+                if self
+                    .guard_status
+                    .as_ref()
+                    .is_some_and(|status| status.pending()) =>
+            {
+                self.rollback_guard();
+                false
+            }
             KeyCode::Char('q') | KeyCode::Esc => true,
             KeyCode::Char('p') => {
                 self.apply_workspace();
@@ -1043,6 +1167,15 @@ impl App {
         &mut self,
         apply: impl FnOnce(PathBuf, bool) -> Result<(), String> + Send + 'static,
     ) {
+        if self.guard_action_in_flight
+            || self
+                .guard_status
+                .as_ref()
+                .is_some_and(|status| status.pending())
+        {
+            self.state.status = "网络保护事务尚未结束，不能普通应用；请先确认或恢复".into();
+            return;
+        }
         if self.apply_in_flight {
             self.state.status = "配置正在应用...".into();
             return;
@@ -1152,6 +1285,114 @@ impl App {
         });
     }
 
+    fn guarded_local(&self) -> bool {
+        self.config_reload == ConfigReload::LocalSystemd
+            && self.config_path.as_deref() == Some(Path::new(crate::workspace::DEFAULT_SOURCE_PATH))
+    }
+
+    fn refresh_guard_status(&mut self) {
+        if !self.guarded_local()
+            || self.guard_read_in_flight
+            || self.guard_action_in_flight
+            || self.last_guard_refresh.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        self.guard_read_in_flight = true;
+        self.last_guard_refresh = Instant::now();
+        let generation = self.guard_generation;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(WorkerResult::GuardStatus {
+                generation,
+                action: false,
+                result: crate::network_guard::status(),
+            });
+        });
+    }
+
+    fn start_guard_action(&mut self, action: GuardAction) {
+        let operation = action.clone();
+        self.start_guard_action_with(action, move || match operation {
+            GuardAction::Apply => crate::network_guard::apply(90),
+            GuardAction::Confirm(id) => crate::network_guard::confirm(&id),
+            GuardAction::Rollback(id) => crate::network_guard::rollback(&id),
+        });
+    }
+
+    fn start_guard_action_with(
+        &mut self,
+        action: GuardAction,
+        operation: impl FnOnce() -> Result<crate::network_guard::Status, String> + Send + 'static,
+    ) {
+        if !self.guarded_local() {
+            self.state.status = "保护应用仅支持默认本机托管模式，不管理外部服务".into();
+            return;
+        }
+        if self.guard_action_in_flight || self.apply_in_flight {
+            self.state.status = "保护/应用操作正在进行，请勿并发重启".into();
+            return;
+        }
+        if matches!(action, GuardAction::Apply)
+            && self
+                .guard_status
+                .as_ref()
+                .is_some_and(|status| status.pending())
+        {
+            self.guard_dialog = true;
+            self.state.status = "已有保护事务，请先确认或恢复".into();
+            return;
+        }
+        self.guard_action_in_flight = true;
+        self.guard_generation += 1;
+        self.state.status = "正在后台执行保护操作；不会自动确认网络可用".into();
+        let generation = self.guard_generation;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let _ = sender.send(WorkerResult::GuardStatus {
+                generation,
+                action: true,
+                result: operation(),
+            });
+        });
+    }
+
+    fn guard_remaining(&self) -> Option<u64> {
+        self.guard_status
+            .as_ref()?
+            .remaining_seconds
+            .map(|seconds| seconds.saturating_sub(self.guard_sampled_at.elapsed().as_secs()))
+    }
+
+    fn confirm_guard(&mut self) {
+        if self.guard_status.as_ref().and_then(|status| status.phase())
+            != Some(crate::network_guard::Phase::Trial)
+            || self.guard_remaining() == Some(0)
+        {
+            self.state.status = "当前阶段/期限不能确认；请查看恢复状态".into();
+            return;
+        }
+        if let Some(id) = self
+            .guard_status
+            .as_ref()
+            .and_then(|status| status.id())
+            .map(str::to_owned)
+        {
+            self.start_guard_action(GuardAction::Confirm(id));
+        }
+    }
+
+    fn rollback_guard(&mut self) {
+        if let Some(id) = self
+            .guard_status
+            .as_ref()
+            .and_then(|status| status.id())
+            .map(str::to_owned)
+        {
+            self.start_guard_action(GuardAction::Rollback(id));
+        }
+    }
+
     fn start_diagnostics(&mut self, probe: bool) {
         if self.diagnostics_view.loading {
             return;
@@ -1244,6 +1485,36 @@ impl App {
                 area,
             );
         }
+        if self.guard_dialog
+            && let Some(status) = &self.guard_status
+        {
+            let area = centered_rect(76, 12, frame.area());
+            frame.render_widget(Clear, area);
+            let deadline = self
+                .guard_remaining()
+                .map(|seconds| format!("约剩余 {seconds} 秒；最终以持久期限校验为准"))
+                .unwrap_or_else(|| "正在恢复/需要人工处理；不是等待确认阶段".into());
+            let text = format!(
+                "事务：{}\n阶段：{}\n{}\n\n确认前请用新的 SSH 会话检查，并验证所需网络。\nC 表示你已验证并保留新配置；API 成功不会代替确认。\nB 立即恢复/重试恢复；Esc 只关闭提示，保护继续。\nq 退出也不会取消恢复任务。{}",
+                status.id().unwrap_or("未知"),
+                status
+                    .phase()
+                    .map(|phase| phase.label())
+                    .unwrap_or("无事务"),
+                deadline,
+                if self.guard_action_in_flight {
+                    "\n正在处理中，不会启动并发操作。"
+                } else {
+                    ""
+                }
+            );
+            frame.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: true })
+                    .block(Block::bordered().title(" 网络保护 · 人工确认 ")),
+                area,
+            );
+        }
         let footer =
             Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(root[2]);
         frame.render_widget(
@@ -1260,6 +1531,9 @@ impl App {
     }
 
     fn shortcut_help(&self) -> &'static str {
+        if self.guard_dialog {
+            return "C 已验证网络并确认  B 恢复  Esc 关闭提示（计时继续） Ctrl+C 退出";
+        }
         if self.state.page == Page::Connections && self.connections_view.filtering {
             return "输入过滤词  Backspace 删除  Enter/Esc 结束搜索  Ctrl+C 退出";
         }
@@ -1286,7 +1560,7 @@ impl App {
             };
         }
         match (self.state.page, self.proxy_members_focused) {
-            (Page::Dashboard, _) => "1-7/Tab 页面  t TUN  d DNS  p 重启核心  7 诊断  q 退出",
+            (Page::Dashboard, _) => "1-7/Tab 页面  t TUN  d DNS  p 重启  P 保护应用  q 退出",
             (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重启核心  r 刷新  q 退出",
             (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重启核心  Left 返回",
             (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
@@ -1300,7 +1574,7 @@ impl App {
     }
 
     fn dashboard(&self, frame: &mut Frame, area: Rect) {
-        let rows = vec![
+        let mut rows = vec![
             ListItem::new("核心       Mihomo API"),
             ListItem::new(format!("控制器     {}", self.state.controller)),
             ListItem::new(format!(
@@ -1353,6 +1627,25 @@ impl App {
             )),
             ListItem::new(format!("订阅源     {}", self.config.providers.len())),
         ];
+        if let Some(status) = &self.guard_status {
+            rows.push(ListItem::new(format!(
+                "网络保护   {}{}",
+                status
+                    .phase()
+                    .map(|phase| phase.label())
+                    .unwrap_or(if status.initialized {
+                        "无待处理事务"
+                    } else {
+                        "未初始化（P需人工基线）"
+                    }),
+                self.guard_remaining()
+                    .map(|seconds| format!(" · {seconds}s"))
+                    .unwrap_or_default()
+            )));
+        }
+        if let Some(error) = &self.guard_error {
+            rows.push(ListItem::new(format!("保护提示   {error}")));
+        }
         frame.render_widget(
             List::new(rows)
                 .block(Block::bordered().title(" 运行状态 "))
@@ -1773,7 +2066,6 @@ fn draw_empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str, c
         message_area,
     );
 }
-
 
 fn provider_url_label(raw: &str) -> String {
     let Ok(url) = reqwest::Url::parse(raw) else {
@@ -2972,6 +3264,117 @@ rules:
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn protected_apply_is_unavailable_in_external_mode_without_calling_local_services() {
+        let mut app = App::new(None, None, None);
+        app.start_guard_action_with(GuardAction::Apply, || panic!("must not call local guard"));
+        assert!(!app.guard_action_in_flight);
+        assert!(app.state.status.contains("默认本机托管"));
+    }
+
+    #[test]
+    fn protected_actions_are_background_tasks_and_report_failures_without_restarting_the_host() {
+        let mut app = App::new(None, None, None);
+        app.config_reload = ConfigReload::LocalSystemd;
+        app.config_path = Some(PathBuf::from(crate::workspace::DEFAULT_SOURCE_PATH));
+        app.start_guard_action_with(GuardAction::Apply, || Err("fixture guard failure".into()));
+        assert!(app.guard_action_in_flight);
+        app.start_guard_action_with(GuardAction::Apply, || panic!("duplicate guard task"));
+        for _ in 0..100 {
+            app.process_worker_results();
+            if !app.guard_action_in_flight {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!app.guard_action_in_flight);
+        assert!(app.state.status.contains("fixture guard failure"));
+    }
+
+    #[test]
+    fn a_protected_trial_requires_explicit_confirmation_and_survives_dismissing_the_prompt() {
+        let mut app = App::new(None, None, None);
+        app.config_reload = ConfigReload::LocalSystemd;
+        app.config_path = Some(PathBuf::from(crate::workspace::DEFAULT_SOURCE_PATH));
+        app.start_guard_action_with(GuardAction::Apply, || {
+            Ok(crate::network_guard::test_status(
+                crate::network_guard::Phase::Trial,
+            ))
+        });
+        for _ in 0..100 {
+            app.process_worker_results();
+            if !app.guard_action_in_flight {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("人工确认"), "{screen}");
+        assert!(screen.contains("SSH"), "{screen}");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.guard_action_in_flight);
+        assert_eq!(
+            app.guard_status.as_ref().unwrap().phase(),
+            Some(crate::network_guard::Phase::Trial)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.guard_dialog);
+        assert!(app.guard_status.as_ref().unwrap().pending());
+        app.apply_workspace_with(|_, _| panic!("ordinary apply must not bypass trial"));
+        assert!(!app.apply_in_flight);
+    }
+
+    #[test]
+    fn stale_guard_reads_and_successful_api_refreshes_cannot_confirm_a_trial() {
+        let mut app = App::new(None, None, None);
+        app.guard_status = Some(crate::network_guard::test_status(
+            crate::network_guard::Phase::Trial,
+        ));
+        app.guard_generation = 2;
+        app.worker_tx
+            .send(WorkerResult::GuardStatus {
+                generation: 1,
+                action: false,
+                result: Ok(crate::network_guard::test_status(
+                    crate::network_guard::Phase::Confirmed,
+                )),
+            })
+            .unwrap();
+        app.worker_tx
+            .send(WorkerResult::Proxies(Ok(Vec::new())))
+            .unwrap();
+        app.process_worker_results();
+        assert_eq!(
+            app.guard_status.as_ref().unwrap().phase(),
+            Some(crate::network_guard::Phase::Trial)
+        );
+    }
+
+    #[test]
+    fn confirming_network_settings_does_not_discard_unsaved_rule_edits() {
+        let (directory, source) = provider_test_config("guard-unsaved-rules");
+        let mut app = App::new(None, None, Some(source));
+        app.state.rules.toggle(0);
+        assert!(!app.state.rules.rules[0].enabled);
+        app.guard_status = Some(crate::network_guard::test_status(
+            crate::network_guard::Phase::Trial,
+        ));
+        app.worker_tx
+            .send(WorkerResult::GuardStatus {
+                generation: 0,
+                action: true,
+                result: Ok(crate::network_guard::test_status(
+                    crate::network_guard::Phase::Confirmed,
+                )),
+            })
+            .unwrap();
+        app.process_worker_results();
+        assert!(!app.state.rules.rules[0].enabled);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

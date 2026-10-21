@@ -74,7 +74,11 @@ impl Status {
         let Some(tx) = &ledger.transaction else {
             return format!("保护设施已初始化；{baseline}；无待处理事务");
         };
-        let mut text = format!("{baseline}\n事务 {}：{}", self.id().unwrap_or("未知"), self.phase().map(|phase| phase.label()).unwrap_or("无事务"));
+        let mut text = format!(
+            "{baseline}\n事务 {}：{}",
+            self.id().unwrap_or("未知"),
+            self.phase().map(|phase| phase.label()).unwrap_or("无事务")
+        );
         if let Some(seconds) = self.remaining_seconds {
             text.push_str(&format!("；剩余 {seconds} 秒，未确认将恢复基线"));
         }
@@ -321,4 +325,42 @@ fn finish_recovery(
         let _ = engine.host.disarm();
     }
     result.map(|_| ())
+}
+
+#[cfg(test)]
+pub(crate) fn test_status(phase: Phase) -> Status {
+    let baseline = model::Snapshot::fixture("b", "1");
+    let candidate = model::Snapshot::fixture("c", "2");
+    let mut tx = model::Transaction::new(
+        "a".repeat(32),
+        baseline.clone(),
+        candidate.clone(),
+        &model::Stamp {
+            boot_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            uptime_ms: 0,
+        },
+        90,
+        "e".repeat(32),
+    )
+    .unwrap();
+    tx.phase = phase;
+    let ledger = Ledger {
+        checkpoint: Some(if phase == Phase::Confirmed {
+            candidate
+        } else {
+            baseline
+        }),
+        transaction: Some(tx),
+        ..Ledger::default()
+    };
+    ledger.validate().unwrap();
+    Status {
+        initialized: true,
+        remaining_seconds: if phase == Phase::Trial {
+            Some(90)
+        } else {
+            None
+        },
+        ledger: Some(Box::new(ledger)),
+    }
 }

@@ -53,7 +53,7 @@ const TOP_LEVEL_AFTER_HELP: &str = r#"快速开始：
   sudo mihomo-tui network checkpoint --confirm-working
       仅在你确认当前文件已加载且网络正常时，登记基线并准备恢复设施。
   sudo mihomo-tui network apply --confirm-within 90
-      保护应用，须在窗口内通过 network confirm 明确确认。
+      保护应用，须人工确认；TUI 使用大写 P，普通 p 不带限时恢复。
 
 完整服务器说明：
   /usr/share/doc/mihomo-tui/server-guide.md
