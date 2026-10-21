@@ -26,11 +26,14 @@ Deb 与 RPM 是完整的软件包，包含 `mihomo-tui`、经过固定和校验�
 
 ## 核心特性
 
-- 基于 Ratatui 的状态、代理、规则和配置四个工作区
+- 基于 Ratatui 的状态、代理、规则、配置、连接、日志和诊断七个工作区
 - 通过一个原生 YAML 管理订阅、规则、TUN、DNS、端口和运行模式
 - 首次启动可无损导入现有 Mihomo 配置，并保留未知或自定义字段
 - 配置原子写入、权限为 `0600` 的私有备份及写入前语法检查
 - 通过 Controller API 获取代理组、切换节点、刷新数据和测试延迟
+- 查看活跃连接的入口、命中规则和代理链，搜索目标并查看详情
+- 有界的脱敏实时日志缓冲，支持滚动、暂停展示和清空本地缓冲
+- 只读 `doctor` 检查服务、Controller 与 IPv4 TUN 路由，显式 HTTPS 探测并展示连接证据
 - 显式应用配置，不在启动或普通编辑过程中隐式安装、升级或重载内核
 - 带版本的不可变内核目录、原子激活、API 健康检查和失败自动回滚
 - 原生 `x86_64` / `aarch64` Deb、RPM 与 ELF 发布物及 SHA-256 校验文件
@@ -142,6 +145,9 @@ MIHOMO_SECRET='你的密钥' \
 | --- | --- |
 | `mihomo-tui` | 启动终端界面 |
 | `mihomo-tui -h` | 查看完整中文帮助 |
+| `sudo mihomo-tui doctor` | 只读检查配置、Controller、服务与 IPv4 TUN 路由 |
+| `sudo mihomo-tui doctor --json` | 输出结构化诊断；不会自动修改配置或修复网络 |
+| `sudo mihomo-tui doctor --probe` | 显式请求 github.com 并观察新连接，不使用环境代理 |
 | `mihomo-tui core status` | 只读查看当前、已安装、推荐和兼容版本 |
 | `sudo mihomo-tui core upgrade` | 显式执行带健康检查和自动回滚的内核升级 |
 | `mihomo-tui --controller <地址>` | 连接已有 Controller |
@@ -151,7 +157,7 @@ MIHOMO_SECRET='你的密钥' \
 
 | 按键 | 操作 |
 | --- | --- |
-| `1` / `2` / `3` / `4`、`Tab` | 切换状态、代理、规则和配置页面 |
+| `1`–`7`、`Tab` | 切换状态、代理、规则、配置、连接、日志和诊断页面 |
 | `j` / `k`、方向键 | 移动选择 |
 | `Right` / `Enter`、`Left` | 进入或退出代理组节点列表 |
 | `Enter` | 应用选中的代理节点 |
@@ -165,6 +171,14 @@ MIHOMO_SECRET='你的密钥' \
 | `Space` / `x`、`s` | 标记规则删除、保存规则变更 |
 | `J` / `K` | 下移 / 上移规则 |
 | `q` / `Esc` | 退出 |
+
+连接页：`/` 输入搜索词，`Enter` / `Esc` 结束搜索，`c` 清除搜索，`Enter` 切换详情，`r` 刷新。
+日志页：`Space` 暂停/继续展示（暂停时仍收集），`j` / `k` 滚动，`c` 清空本地缓冲，`r` 重新订阅。
+诊断页：`r` 只读检查，`g` **显式联网探测 github.com**，`j` / `k` 滚动报告。
+
+默认诊断不访问外部探测站点，不初始化缺失配置，不启动、安装或重启核心。路由结构检查与
+真实接管分开报告；按域名观测到连接仍不能排除并发请求，采样遗漏也不等于接管失败。
+日志只在内存保留最近 500 条，不是完整历史；断线重连或队列满时可能遗漏。详见[服务器手册](docs/server-guide.md#只读诊断与真实探测)。
 
 删除订阅支持离线操作，会自动备份配置并清理代理组的 `use` 引用。代理组和规则保留；组内已无节点来源时使用 `REJECT`（若配置了 `empty-fallback` 则沿用），已有其他节点或直连选项不变。删除保存后，按 `p` 重启受管核心使其生效；外部核心需自行重启。
 
@@ -218,6 +232,8 @@ flowchart LR
 src/app.rs             TUI 状态与页面流程
 src/config.rs          原生 Mihomo YAML 读取和编辑
 src/mihomo.rs          Controller API 边界
+src/diagnostics/       只读诊断、真实请求与证据报告
+src/observability/     活跃连接、实时日志与有界后台订阅
 src/core/              版本、清单和兼容策略
 src/core_manager/      托管内核清单与不可变存储
 src/core_upgrade/      激活、健康检查和回滚事务

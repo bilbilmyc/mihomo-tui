@@ -125,11 +125,67 @@ sudo mihomo-tui
 mihomo-tui core status
 ```
 
-跟踪服务日志：
+### 连接与实时日志
+
+TUI 的 `5` 连接页每秒获取一次活跃连接快照。可以按 `/` 搜索目标、入口、规则或链路，
+按 `Enter` 查看详情。列表不是历史记录；刷新失败时保留旧快照并明确提示。最多显示
+512 条，超限会提示截断，不能据此断言整机没有其他连接。`r` 手动刷新。
+
+`6` 日志页通过 Controller 获取 info 及以上实时日志，不改核心日志级别。`Space` 暂停
+展示但继续收集，`j` / `k` 或方向键滚动，`PageUp` / `PageDown` 翻页，`End` 回到最新，
+`c` 清空本地缓冲，`r` 重连。仅保留最近 500 条；单行输入上限 16 KiB，展示文本上限
+2048 字符，传输队列上限 128 条，队列丢弃计数可见。
+
+离开日志页会取消订阅，当前 HTTP 等待最长约 3 秒结束；整个 TUI 只维护一个日志工作线程。
+日志采用有超时的 HTTP 流重连，重连期间可能遗漏，连续 3 次空闲/失败后暂停自动重连，
+按 `r` 或重新进入页面重试。空闲没有日志不代表核心故障。暂停展示最多另保留 500 条冻结快照。
+URL、已知 API 密钥与终端控制字符会被处理，但节点名、域名/IP 等仍可能敏感，不能直接公开。
+
+需要完整历史或跟踪服务日志时仍使用：
 
 ```bash
 journalctl -u mihomo.service -f
 ```
+
+### 只读诊断与真实探测
+
+```bash
+sudo mihomo-tui doctor
+sudo mihomo-tui doctor --json
+sudo mihomo-tui doctor --probe
+```
+
+默认只读检查配置、Controller、服务、TUN 设备与 IPv4 策略路由，不向互联网目标发起探测，
+不会初始化缺失配置、安装/启动/重启核心或修改 networkd。读取本机私有配置通常需要 root；
+不具备权限的检查显示未知。可用 `--workspace`（优先）或 `--config` 在 `doctor` 前指定
+只读配置来源；诊断拒绝符号链接、设备与管道。
+
+报告状态区分 `pass`、`warning`、`fail`、`unknown`、`not_applicable`。JSON 的
+`schema_version` 当前为 `1`，包含采集 Unix 时间戳、适用范围和 `checks` 列表。
+发现明确的 `fail` 返回退出码 1；其他报告返回 0，**0 不等于所有网络检查都已通过**。
+命令参数错误通常返回 2。不能把路由存在、网卡 UP 或 API 可用当成真实流量已进入代理。
+设备名和路由表编号会用本地配置补足 API 未提供的字段；尚未应用的配置可能与运行核心
+不同。报告中的结构失败应结合待应用状态理解，不要据此自动改路由或重启服务。
+
+`--probe` 使用独立客户端请求固定的 `https://github.com/`，不读取代理环境变量，不显式
+设置本地代理，不跟随重定向，也不会向目标发送 Controller 密钥或读取完整响应体。
+同时观察目标相关的新连接，分别展示 HTTP 结果和入口/规则/链路。短连接可能漏采，多个
+并发请求可能无法区分；这两种情况会保留未知/警告，不能误判为接管失败或成功。
+IPv6、完整 DNS 路径和持续健康不在本轮验证范围内。
+
+`7` 诊断页复用相同逻辑，进入时默认只读采样；`r` 重采，`g` 明确触发联网探测。
+后台采集不阻塞页面切换与退出，同类检查不并发叠加。
+
+外部 Controller 可这样排查：
+
+```bash
+MIHOMO_SECRET='your-secret' \
+  mihomo-tui --controller http://127.0.0.1:9093 doctor --json
+```
+
+外部模式不读取本机配置或检查本机 systemd/网卡/路由，也不会在本机请求 GitHub 冒充远端
+探测；要验证远端实际接管，应登录对应服务器运行本机 `doctor --probe`。外部 Controller
+直连且不跟随 HTTP 重定向；请使用实际 API 地址和 HTTPS/专用网络/SSH 转发。
 
 不要把 `/etc/mihomo-tui/config.yaml` 或其备份直接粘贴到公开问题中；文件可能包含
 Controller 密钥和订阅凭据。
@@ -303,6 +359,7 @@ sudo apt remove mihomo-tui
 ```bash
 mihomo-tui --version
 mihomo-tui core status
+sudo mihomo-tui doctor --json
 systemctl is-active mihomo.service
 systemctl is-enabled mihomo.service
 systemctl status --no-pager mihomo.service
