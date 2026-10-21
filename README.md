@@ -34,6 +34,7 @@ Deb 与 RPM 是完整的软件包，包含 `mihomo-tui`、经过固定和校验�
 - 查看活跃连接的入口、命中规则和代理链，搜索目标并查看详情
 - 有界的脱敏实时日志缓冲，支持滚动、暂停展示和清空本地缓冲
 - 只读 `doctor` 检查服务、Controller 与 IPv4 TUN 路由，显式 HTTPS 探测并展示连接证据
+- 可选 TUN/DNS 保护应用：独立恢复任务、限时人工确认、持久基线与启动前检查；默认不启用
 - 显式应用配置，不在启动或普通编辑过程中隐式安装、升级或重载内核
 - 带版本的不可变内核目录、原子激活、API 健康检查和失败自动回滚
 - 原生 `x86_64` / `aarch64` Deb、RPM 与 ELF 发布物及 SHA-256 校验文件
@@ -128,6 +129,37 @@ sudo mihomo-tui
 
 `p` 是显式重启操作，即使配置未修改也会执行，可用于恢复被其他网络管理程序清理的 TUN 路由。界面的“TUN 配置开启”只表示 YAML 开关，不代表已验证实际流量接管；路由检查和 systemd-networkd 冲突处理见[服务器手册](docs/server-guide.md#tun-无法工作)。
 
+### 可选的 TUN / DNS 保护应用
+
+普通 `p` 仍是直接重启应用，**只有大写 `P` 或 `network apply` 才开启限时恢复**。
+首版仅支持默认本机配置，且候选只可改动 `tun` / `dns`，不能混入订阅、规则、端口或内核变更。
+
+**务必在编辑前**，由管理员确认当前磁盘配置已经加载、新 SSH 会话及所需网络正常，再登记基线：
+
+```bash
+sudo mihomo-tui network status
+sudo mihomo-tui network checkpoint --confirm-working
+```
+
+登记会准备 root 私有恢复程序、systemd timer/service 与启动前检查，但不重启核心，也不会
+代你启用原本未启用的核心服务。没有人工确认的基线时，保护应用会拒绝执行，不能用编辑后的
+备份冒充可工作配置。之后编辑并保存 TUN/DNS，按 `P`，或执行：
+
+```bash
+sudo mihomo-tui network apply --confirm-within 90
+sudo mihomo-tui network status
+sudo mihomo-tui network confirm TRANSACTION_ID
+# 不保留新配置时：
+sudo mihomo-tui network rollback TRANSACTION_ID
+```
+
+TUI 中，检查**新的 SSH 会话**及所需网络后按大写 `C` 确认，按大写 `B` 请求恢复。
+`Enter`、API 连通、退出程序或关闭提示都不会自动确认。确认窗口默认 90 秒（可选 30–300），
+恢复还受调度和服务启动耗时影响，不是精确时间或绝对 SSH 安全承诺。
+
+实现已通过隔离状态机/文件系统测试和 unit 静态验证，**尚未进行隔离主机的真实重启验收**。
+恢复范围、冲突处理与部署前检查见[服务器手册](docs/server-guide.md#保护应用与限时确认)。
+
 ### 外部 Controller 模式
 
 连接由其他工具管理的 Mihomo，不修改本机 systemd：
@@ -148,6 +180,9 @@ MIHOMO_SECRET='你的密钥' \
 | `sudo mihomo-tui doctor` | 只读检查配置、Controller、服务与 IPv4 TUN 路由 |
 | `sudo mihomo-tui doctor --json` | 输出结构化诊断；不会自动修改配置或修复网络 |
 | `sudo mihomo-tui doctor --probe` | 显式请求 github.com 并观察新连接，不使用环境代理 |
+| `sudo mihomo-tui network status --json` | 只读查看基线与保护事务，不创建状态目录 |
+| `sudo mihomo-tui network checkpoint --confirm-working` | 人工登记已加载、可工作的配置并准备恢复设施 |
+| `sudo mihomo-tui network apply --confirm-within 90` | 保护应用 TUN/DNS，超时未确认则尝试恢复 |
 | `mihomo-tui core status` | 只读查看当前、已安装、推荐和兼容版本 |
 | `sudo mihomo-tui core upgrade` | 显式执行带健康检查和自动回滚的内核升级 |
 | `mihomo-tui --controller <地址>` | 连接已有 Controller |
@@ -164,6 +199,8 @@ MIHOMO_SECRET='你的密钥' \
 | `l` | 测试选中节点的延迟 |
 | `r` | 刷新 Mihomo 数据；配置页优先更新选中的 HTTP 订阅 |
 | `p` | 校验当前配置并启动或重启受管 Mihomo |
+| `P` | 使用人工基线保护应用 TUN/DNS，默认 90 秒确认窗口 |
+| `C` / `B` | 保护事务中，明确确认网络可用 / 请求恢复 |
 | `t` / `d` | 从状态页打开 TUN / DNS 高级设置 |
 | `a` / `A` | 添加订阅，或在规则列表顶部 / 底部添加规则 |
 | `e` | 编辑选中的订阅或规则 |
@@ -234,6 +271,7 @@ src/config.rs          原生 Mihomo YAML 读取和编辑
 src/mihomo.rs          Controller API 边界
 src/diagnostics/       只读诊断、真实请求与证据报告
 src/observability/     活跃连接、实时日志与有界后台订阅
+src/network_guard/     持久基线、限时确认、启动前检查与恢复事务
 src/core/              版本、清单和兼容策略
 src/core_manager/      托管内核清单与不可变存储
 src/core_upgrade/      激活、健康检查和回滚事务
