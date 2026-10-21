@@ -123,6 +123,8 @@ sudo mihomo-tui
 
 启动只打开并编辑配置，不会自动升级内核。按 `p` 才会校验配置、配置受管 systemd drop-in，并重启服务，使更新后的 `ExecStart` 和唯一配置同时生效。
 
+`p` 是显式重启操作，即使配置未修改也会执行，可用于恢复被其他网络管理程序清理的 TUN 路由。界面的“TUN 配置开启”只表示 YAML 开关，不代表已验证实际流量接管；路由检查和 systemd-networkd 冲突处理见[服务器手册](docs/server-guide.md#tun-无法工作)。
+
 ### 外部 Controller 模式
 
 连接由其他工具管理的 Mihomo，不修改本机 systemd：

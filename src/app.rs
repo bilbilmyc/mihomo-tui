@@ -962,6 +962,18 @@ impl App {
     }
 
     fn apply_workspace(&mut self) {
+        self.apply_workspace_with(|source, auto_install| {
+            crate::runtime::ensure(crate::runtime::RuntimeMode::ManagedLocal, auto_install)
+                .and_then(|()| config::validate_for_runtime(&source))
+                .and_then(|()| crate::runtime::configure_workspace_service(&source))
+                .and_then(|()| reload_mihomo_service())
+        });
+    }
+
+    fn apply_workspace_with(
+        &mut self,
+        apply: impl FnOnce(PathBuf, bool) -> Result<(), String> + Send + 'static,
+    ) {
         if self.apply_in_flight {
             self.state.status = "配置正在应用...".into();
             return;
@@ -974,20 +986,14 @@ impl App {
             self.state.status = "本地重启不可用：未发现唯一配置路径".into();
             return;
         };
-        if !self.reload_pending {
-            self.state.status = "Mihomo 核心已加载当前配置，无需重复操作".into();
-            return;
-        }
+        // An explicit apply also repairs runtime state, such as TUN policy rules
+        // removed by another network manager after the previous successful apply.
         self.apply_in_flight = true;
         self.state.status = "正在校验唯一配置并重启核心...".into();
         let sender = self.worker_tx.clone();
         let auto_install = self.auto_install;
         thread::spawn(move || {
-            let result =
-                crate::runtime::ensure(crate::runtime::RuntimeMode::ManagedLocal, auto_install)
-                    .and_then(|()| config::validate_for_runtime(&source))
-                    .and_then(|()| crate::runtime::configure_workspace_service(&source))
-                    .and_then(|()| reload_mihomo_service());
+            let result = apply(source, auto_install);
             let _ = sender.send(WorkerResult::ConfigApplied(result));
         });
     }
@@ -1187,7 +1193,7 @@ impl App {
                 } else if self.reload_pending {
                     "待重启（按 p）"
                 } else {
-                    "已加载当前配置"
+                    "上次应用成功（p 可重启）"
                 }
             )),
             ListItem::new(format!("模式       {}", self.config.mode)),
@@ -1199,11 +1205,11 @@ impl App {
                     .unwrap_or_else(|| "未配置".into())
             )),
             ListItem::new(format!(
-                "TUN        {} (t 设置)",
+                "TUN 配置   {} (t 设置)",
                 if self.config.tun.enable {
-                    "已启用"
+                    "开启（接管未检测）"
                 } else {
-                    "已关闭"
+                    "关闭"
                 }
             )),
             ListItem::new(format!(
@@ -2108,6 +2114,33 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_does_not_claim_configured_tun_is_verified() {
+        let mut app = App::new(None, None, None);
+        app.config.tun.enable = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("TUN 配置"), "{screen}");
+        assert!(screen.contains("接管未检测"), "{screen}");
+    }
+
+    #[test]
+    fn dashboard_distinguishes_last_apply_from_runtime_health() {
+        let mut app = App::new(None, None, None);
+        app.config_reload = ConfigReload::LocalSystemd;
+        app.reload_pending = false;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("上次应用成功"), "{screen}");
+        assert!(!screen.contains("已加载当前配置"), "{screen}");
+    }
+
+    #[test]
     fn apply_key_explains_when_no_local_backend_is_configured() {
         let mut app = App::new(None, None, None);
 
@@ -2136,16 +2169,70 @@ mod tests {
     }
 
     #[test]
-    fn apply_key_does_not_reload_an_already_applied_config() {
+    fn explicit_apply_restarts_even_when_the_config_has_not_changed() {
         let (directory, source, _) = workspace_test_config("already-loaded");
+        let mut app = App::with_workspace(
+            None,
+            None,
+            Some(source.clone()),
+            ConfigReload::LocalSystemd,
+            false,
+        );
+        app.reload_pending = false;
+
+        // Exercise the apply path without touching the host's real systemd service.
+        app.apply_workspace_with(move |path, auto_install| {
+            assert_eq!(path, source);
+            assert!(!auto_install);
+            Ok(())
+        });
+
+        assert!(app.apply_in_flight);
+        assert!(app.state.status.contains("正在校验"));
+        app.apply_workspace_with(|_, _| panic!("must not restart concurrently"));
+        assert_eq!(app.state.status, "配置正在应用...");
+        for _ in 0..100 {
+            app.process_worker_results();
+            if !app.apply_in_flight {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.apply_in_flight);
+        assert!(app.state.status.contains("核心已重启"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_apply_never_restarts_an_external_core() {
+        let mut app = App::new(None, None, None);
+        app.reload_pending = false;
+
+        app.apply_workspace_with(|_, _| panic!("external mode must not manage systemd"));
+
+        assert!(!app.apply_in_flight);
+        assert!(app.state.status.contains("只连接外部控制器"));
+    }
+
+    #[test]
+    fn explicit_reapply_failure_keeps_the_config_pending() {
+        let (directory, source, _) = workspace_test_config("reapply-failure");
         let mut app =
             App::with_workspace(None, None, Some(source), ConfigReload::LocalSystemd, false);
         app.reload_pending = false;
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.apply_workspace_with(|_, _| Err("模拟配置校验失败".into()));
+        for _ in 0..100 {
+            app.process_worker_results();
+            if !app.apply_in_flight {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
 
         assert!(!app.apply_in_flight);
-        assert!(app.state.status.contains("无需重复"));
+        assert!(app.reload_pending);
+        assert!(app.state.status.contains("配置应用失败：模拟配置校验失败"));
         fs::remove_dir_all(directory).unwrap();
     }
 

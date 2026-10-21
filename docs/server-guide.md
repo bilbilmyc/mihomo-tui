@@ -87,6 +87,9 @@ sudo mihomo-tui
 systemd drop-in，然后执行 `systemctl restart mihomo.service`，以确保更新后的启动参数和配置
 都生效。
 
+即使配置未修改，再按 `p` 也会重新校验并重启，可用于恢复丢失的 TUN 路由。正在应用时
+重复按键不会启动并发重启。此操作会短暂中断现有代理连接。
+
 只有 TUI 明确报告应用成功后，才执行：
 
 ```bash
@@ -229,6 +232,51 @@ sudo systemctl enable --now mihomo.service
 
 确认服务器存在 `/dev/net/tun`，内核和虚拟化平台允许 TUN，并检查主机防火墙、转发和
 现有路由。修改远程服务器默认路由前务必保留第二个 SSH 会话。
+
+界面的“TUN 配置开启”来自 YAML，并没有检测网卡、策略路由或真实连接。“上次应用成功”
+也不代表系统运行状态始终健康。网卡存在、API 可连接、节点测速正常，都不能单独证明
+普通请求正在被 TUN 接管。
+
+例如 GitHub 不指定代理很慢，但显式指定代理很快时，可以对照检查（端口按实际配置替换）：
+
+```bash
+curl --noproxy '*' -I --connect-timeout 5 --max-time 15 https://github.com
+curl --noproxy '' --proxy http://127.0.0.1:7890 -I --connect-timeout 5 --max-time 15 https://github.com
+ip -4 rule show
+ip -4 route show table 2022
+# 将 GITHUB_IP 替换为本次请求解析出的 IPv4 地址
+ip -4 route get GITHUB_IP
+```
+
+`2022` 是 Mihomo 默认 TUN 路由表；如果配置了 `tun.iproute2-table-index`，应查询对应的表。
+即使表中有指向 TUN 的路由，也需要有效的策略规则才能让流量进入该表。缺少查表入口或出现
+`goto ... [unresolved]` 时，可按 `p` 或执行 `sudo systemctl restart mihomo.service` 重建，随后
+复测路由和不指定代理的请求。在 Controller 的连接记录中确认入口为 `Tun`，并检查命中的
+规则和代理链；仅检查 `ip route get` 不能证明最终走了代理节点而非 `DIRECT`。
+
+#### systemd-networkd 重启后 TUN 路由失效
+
+某些 systemd 版本默认使用 `ManageForeignRoutingPolicyRules=yes`，会清理不在 `.network`
+文件中声明的外部策略规则，包括 Mihomo 创建的规则。检查本机手册、有效配置和日志：
+
+```bash
+man networkd.conf
+systemd-analyze cat-config systemd/networkd.conf
+journalctl -u systemd-networkd.service -n 100 --no-pager
+```
+
+确认冲突后，可由管理员添加 `/etc/systemd/networkd.conf.d/90-preserve-mihomo-policy-rules.conf`：
+
+```ini
+[Network]
+ManageForeignRoutingPolicyRules=no
+```
+
+这会让 networkd 保留其他程序创建的策略规则，是全机设置，不会由 TUI 隐式写入。应评估现有
+VPN、Docker/Kubernetes 等网络管理程序，并准备备用 SSH 会话和自动回滚后再使设置生效。
+通常需要重启 networkd，再重启 Mihomo；操作后必须确认 SSH、容器网络和目标请求均正常。
+可参考 [systemd networkd.conf 手册](https://www.freedesktop.org/software/systemd/man/networkd.conf.html#ManageForeignRoutingPolicyRules=)
+及 [Mihomo TUN 文档](https://wiki.metacubex.one/config/inbound/tun/)。
 
 ### Controller 无法连接
 
