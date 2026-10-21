@@ -370,6 +370,81 @@ rules:
     }
 
     #[test]
+    fn deleting_provider_preserves_other_sources_and_repairs_group_references() {
+        let profile: Value = serde_yaml::from_str(
+            r#"
+experimental: {custom: keep-me}
+proxy-providers:
+  赛博云: {type: http, url: 'https://unavailable.invalid/sub'}
+  other: {type: inline, payload: []}
+proxy-groups:
+  - {name: shared, type: select, use: [赛博云, other, 赛博云], filter: HK}
+  - {name: orphan, type: select, use: [赛博云]}
+  - {name: direct, type: select, use: [赛博云], proxies: [DIRECT]}
+  - {name: parent, type: select, proxies: [orphan]}
+  - {name: automatic, type: select, include-all-providers: true}
+  - {name: fallback, type: select, use: [赛博云], empty-fallback: REJECT-DROP}
+rules: ['MATCH,orphan']
+"#,
+        )
+        .unwrap();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mihomo-tui-provider-delete-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.yaml");
+        for wrapped in [false, true] {
+            let mut document = profile.clone();
+            if wrapped {
+                document = serde_yaml::from_str(
+                    "kind: mihomo-tui/v1\nbackend: mihomo\nmetadata: keep-me\n",
+                )
+                .unwrap();
+                document["profile"] = profile.clone();
+            }
+            let original = serde_yaml::to_string(&document).unwrap();
+            fs::write(&path, &original).unwrap();
+            let backup = super::remove_provider(&path, "赛博云").unwrap();
+            assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+            let saved: Value = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            if wrapped {
+                assert_eq!(saved["metadata"], "keep-me");
+                assert_eq!(saved["kind"], "mihomo-tui/v1");
+            }
+            let saved = crate::workspace::config_profile(&saved).unwrap();
+            assert_eq!(saved["proxy-providers"].as_mapping().unwrap().len(), 1);
+            assert_eq!(
+                saved["proxy-providers"]["other"],
+                profile["proxy-providers"]["other"]
+            );
+            assert_eq!(saved["experimental"], profile["experimental"]);
+            assert_eq!(saved["rules"], profile["rules"]);
+            let groups = &saved["proxy-groups"];
+            assert_eq!(groups[0]["use"], serde_yaml::to_value(["other"]).unwrap());
+            assert_eq!(groups[0]["filter"], "HK");
+            assert!(groups[1].as_mapping().unwrap().get("use").is_none());
+            assert_eq!(groups[1]["proxies"][0], "REJECT");
+            assert_eq!(groups[2]["proxies"][0], "DIRECT");
+            assert_eq!(groups[3], profile["proxy-groups"][3]);
+            assert_eq!(groups[4], profile["proxy-groups"][4]);
+            assert_eq!(groups[5]["proxies"][0], "REJECT-DROP");
+
+            super::remove_provider(&path, "other").unwrap();
+            let last: Value = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let last = crate::workspace::config_profile(&last).unwrap();
+            assert!(last["proxy-providers"].as_mapping().unwrap().is_empty());
+            assert_eq!(last["proxy-groups"][0]["proxies"][0], "REJECT");
+            assert_eq!(last["proxy-groups"][4]["proxies"][0], "REJECT");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn wrapped_source_edits_preserve_metadata_and_unknown_profile_fields() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -856,6 +931,71 @@ pub fn add_http_provider(path: &Path, name: &str, url: &str) -> Result<PathBuf, 
         Value::Sequence(vec![Value::String("DIRECT".into())]),
     );
     groups.push(Value::Mapping(group));
+    write_source(path, &document)
+}
+
+pub fn remove_provider(path: &Path, name: &str) -> Result<PathBuf, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut document: Value = serde_yaml::from_str(&content).map_err(|error| error.to_string())?;
+    let root = crate::workspace::config_profile_mut(&mut document)?
+        .as_mapping_mut()
+        .ok_or_else(|| "Mihomo config root must be a mapping".to_string())?;
+    let providers = root
+        .get_mut("proxy-providers")
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| "proxy-providers must be a mapping".to_string())?;
+    if providers.remove(Value::String(name.into())).is_none() {
+        return Err(format!("订阅 {name} 已不存在"));
+    }
+    let has_providers = !providers.is_empty();
+    let has_proxies = field(root, "proxies")
+        .and_then(Value::as_sequence)
+        .is_some_and(|proxies| !proxies.is_empty());
+    if let Some(groups) = root.get_mut("proxy-groups") {
+        let groups = groups
+            .as_sequence_mut()
+            .ok_or_else(|| "proxy-groups must be a list".to_string())?;
+        for group in groups {
+            let group = group
+                .as_mapping_mut()
+                .ok_or_else(|| "proxy group must be a mapping".to_string())?;
+            let mut removed_reference = false;
+            let mut has_explicit_providers = false;
+            if let Some(providers) = group.get_mut("use") {
+                let providers = providers
+                    .as_sequence_mut()
+                    .ok_or_else(|| "proxy group use must be a list".to_string())?;
+                let previous_len = providers.len();
+                providers.retain(|provider| provider.as_str() != Some(name));
+                removed_reference = providers.len() != previous_len;
+                has_explicit_providers = !providers.is_empty();
+                if removed_reference && providers.is_empty() {
+                    group.remove("use");
+                }
+            }
+            let enabled = |key| field(group, key).and_then(Value::as_bool) == Some(true);
+            let includes_providers = enabled("include-all") || enabled("include-all-providers");
+            let includes_proxies = enabled("include-all") || enabled("include-all-proxies");
+            let has_members = field(group, "proxies")
+                .and_then(Value::as_sequence)
+                .is_some_and(|proxies| !proxies.is_empty())
+                || (if includes_providers {
+                    has_providers
+                } else {
+                    has_explicit_providers
+                })
+                || (includes_proxies && has_proxies);
+            if (removed_reference || includes_providers) && !has_members {
+                // Keep the group so rules and other groups still resolve. An orphaned
+                // group must not silently start sending formerly proxied traffic directly.
+                let fallback = field(group, "empty-fallback")
+                    .and_then(Value::as_str)
+                    .unwrap_or("REJECT")
+                    .to_string();
+                set_string_list(group, "proxies", &[fallback]);
+            }
+        }
+    }
     write_source(path, &document)
 }
 

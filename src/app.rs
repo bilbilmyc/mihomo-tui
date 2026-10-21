@@ -26,6 +26,7 @@ pub struct App {
     auto_install: bool,
     reload_pending: bool,
     add_provider: Option<AddProviderDialog>,
+    delete_provider: Option<String>,
     settings_dialog: Option<SettingsDialog>,
     rule_dialog: Option<RuleDialog>,
     worker_tx: Sender<WorkerResult>,
@@ -304,6 +305,7 @@ impl App {
             auto_install,
             reload_pending,
             add_provider: None,
+            delete_provider: None,
             settings_dialog: None,
             rule_dialog: None,
             worker_tx,
@@ -494,6 +496,17 @@ impl App {
         if self.add_provider.is_some() {
             return self.handle_add_provider_key(key);
         }
+        if self.delete_provider.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.commit_delete_provider(),
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.delete_provider = None;
+                    self.state.status = "已取消删除订阅".into();
+                }
+                _ => {}
+            }
+            return false;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => true,
             KeyCode::Char('p') => {
@@ -559,6 +572,14 @@ impl App {
                     editing_url: true,
                     error: None,
                 });
+                false
+            }
+            KeyCode::Char('x') | KeyCode::Delete if self.state.page == Page::Config => {
+                if let Some(provider) = self.config.providers.get(self.state.selected) {
+                    self.delete_provider = Some(provider.name.clone());
+                } else {
+                    self.state.status = "未选择订阅".into();
+                }
                 false
             }
             KeyCode::Char('t') if self.state.page == Page::Dashboard => {
@@ -879,6 +900,36 @@ impl App {
         }
     }
 
+    fn commit_delete_provider(&mut self) {
+        let Some(name) = self.delete_provider.as_ref().cloned() else {
+            return;
+        };
+        let Some(path) = self.config_path.clone() else {
+            self.state.status = "未发现 Mihomo 配置路径".into();
+            return;
+        };
+        match config::remove_provider(&path, &name) {
+            Ok(backup) => {
+                self.delete_provider = None;
+                match self.finalize_config_change(&backup) {
+                    Ok(()) => {
+                        self.state.selected = self
+                            .state
+                            .selected
+                            .min(self.config.providers.len().saturating_sub(1));
+                        self.state.status = format!(
+                            "已删除 {name}，已保存到唯一配置{}；备份 {}",
+                            self.reload_hint(),
+                            backup.display()
+                        );
+                    }
+                    Err(error) => self.state.status = error,
+                }
+            }
+            Err(error) => self.state.status = format!("订阅未删除：{error}"),
+        }
+    }
+
     fn set_add_provider_error(&mut self, error: String) {
         if let Some(dialog) = self.add_provider.as_mut() {
             dialog.error = Some(error.clone());
@@ -1059,6 +1110,18 @@ impl App {
         if let Some(dialog) = &self.rule_dialog {
             draw_rule_dialog(frame, dialog);
         }
+        if let Some(name) = &self.delete_provider {
+            let area = centered_rect(70, 8, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "删除订阅「{name}」？\n将同时移除代理组中的订阅引用，并自动备份配置。\n失去全部节点的组将阻断流量（已有回退策略则保留）。\n\ny 确认删除  n/Esc 取消"
+                ))
+                .wrap(Wrap { trim: true })
+                .block(Block::bordered().title(" 删除订阅 ")),
+                area,
+            );
+        }
         let footer =
             Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(root[2]);
         frame.render_widget(
@@ -1075,6 +1138,9 @@ impl App {
     }
 
     fn shortcut_help(&self) -> &'static str {
+        if self.delete_provider.is_some() {
+            return "y 确认删除  n/Esc 取消  Ctrl+C 退出";
+        }
         if self.add_provider.is_some() {
             return "Tab 切换字段  Enter 保存  Esc 取消  Ctrl+C 退出";
         }
@@ -1099,7 +1165,7 @@ impl App {
             (Page::Proxies, false) => "j/k 代理组  Enter 节点  p 重启核心  r 刷新  q 退出",
             (Page::Proxies, true) => "j/k 节点  Enter 选择  l 延迟  p 重启核心  Left 返回",
             (Page::Rules, _) => "j/k 规则  a/A 新增  e 编辑  x 删除  J/K 排序  s 保存  p 重启",
-            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  r 刷新  p 重启",
+            (Page::Config, _) => "j/k 订阅  Enter 打开组  a 新增  e 改址  x 删除  r 刷新  p 重启",
         }
     }
 
@@ -1875,6 +1941,108 @@ mod tests {
             "https://subscriptions.example.com/..."
         );
         assert_eq!(provider_url_label("not a url"), "<invalid URL>");
+    }
+
+    #[test]
+    fn unavailable_subscription_can_be_deleted_offline() {
+        let (directory, source, imported) = workspace_test_config("provider-delete-offline");
+        let imported_before = fs::read_to_string(&imported).unwrap();
+        fs::write(
+            &source,
+            "proxy-providers:\n  赛博云:\n    type: http\n    url: https://unavailable.invalid/sub\nproxy-groups:\n  - name: Proxy\n    type: select\n    use: [赛博云]\nrules: ['MATCH,Proxy']\n",
+        )
+        .unwrap();
+        let mut app = App::with_workspace(
+            None,
+            None,
+            Some(source.clone()),
+            ConfigReload::LocalSystemd,
+            false,
+        );
+        app.reload_pending = false;
+        app.state.page = Page::Config;
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert!(
+            crate::config::load(&source).unwrap().providers.is_empty(),
+            "失效订阅应能离线删除"
+        );
+        assert!(app.config.providers.is_empty());
+        assert_eq!(app.state.selected, 0);
+        assert!(app.reload_pending);
+        assert!(app.state.status.contains("已删除"));
+        assert!(app.state.status.contains("重启核心"));
+        assert_eq!(fs::read_to_string(&imported).unwrap(), imported_before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn subscription_deletion_requires_confirmation_and_can_be_cancelled() {
+        let (directory, source) = provider_test_config("provider-delete-cancel");
+        crate::config::add_http_provider(&source, "airport", "https://unavailable.invalid/sub")
+            .unwrap();
+        let before = fs::read_to_string(&source).unwrap();
+        let mut app = App::new(None, None, Some(source.clone()));
+        app.state.page = Page::Config;
+        for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
+            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+            assert_eq!(app.delete_provider.as_deref(), Some("airport"));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let screen = terminal.backend().to_string();
+            assert!(screen.contains("airport"), "{screen}");
+            assert!(screen.contains("确认删除"), "{screen}");
+            assert!(!screen.contains("unavailable.invalid"), "{screen}");
+            for key in [
+                KeyCode::Enter,
+                KeyCode::Char('x'),
+                KeyCode::Char('j'),
+                KeyCode::Tab,
+            ] {
+                app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+            }
+            assert_eq!(fs::read_to_string(&source).unwrap(), before);
+            assert!(!app.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE)));
+            assert!(app.delete_provider.is_none());
+            assert_eq!(app.state.page, Page::Config);
+        }
+        assert_eq!(fs::read_to_string(&source).unwrap(), before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn subscription_deletion_keeps_a_valid_selection_and_reports_save_errors() {
+        let (directory, source) = provider_test_config("provider-delete-selection");
+        for name in ["a", "b"] {
+            crate::config::add_http_provider(&source, name, "https://unavailable.invalid/sub")
+                .unwrap();
+        }
+        let mut app = App::new(None, None, Some(source.clone()));
+        app.state.page = Page::Config;
+        app.state.selected = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.config.providers.len(), 1);
+        assert_eq!(app.config.providers[0].name, "a");
+
+        let broken = "proxy-providers: {a: {type: http}}\nproxy-groups: invalid\n";
+        fs::write(&source, broken).unwrap();
+        let file_count = fs::read_dir(&directory).unwrap().count();
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.state.status.contains("订阅未删除"));
+        assert_eq!(app.config.providers.len(), 1);
+        assert_eq!(app.delete_provider.as_deref(), Some("a"));
+        assert_eq!(fs::read_to_string(&source).unwrap(), broken);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), file_count);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.config.providers.clear();
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.delete_provider.is_none());
+        assert_eq!(app.state.status, "未选择订阅");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
