@@ -50,9 +50,37 @@ docker run --rm \
 
 ## CI 与发布
 
-每个 Pull Request 和分支 push 都会运行格式检查、Rust 测试、Clippy、RustSec、发布策略测试以及两个原生架构的软件包任务。软件包任务会构建并检查全部格式，在一次性 runner 上安装 Deb，在 Fedora 中安装 RPM，验证重新安装时保留当前版本，最后丢弃本地构建目录。日常 CI 因而不依赖仓库所有者的临时 Actions artifact 配额。
+每个 Pull Request 和分支 push 都会运行格式检查、Rust 测试、Clippy、RustSec 和发布策略测试。
+质量与安全门禁通过后，两个原生架构的软件包任务构建并检查全部格式，在一次性 runner 上
+安装 Deb、在 Fedora 中安装 RPM，验证重新安装时保留当前版本，然后上传可下载产物。
+
+### 下载分支构建
+
+在仓库 **Actions → 对应提交的 CI → Artifacts** 中选择：
+
+- `mihomo-tui-linux-x86_64-<commit-sha>`
+- `mihomo-tui-linux-aarch64-<commit-sha>`
+
+每份 ZIP 包含对应架构的 Deb、RPM、原生 ELF 和三份 SHA-256 文件，保留 **7 天**。
+下载通常需要登录 GitHub；下载后先解压，再在解压目录校验：
+
+```bash
+sha256sum --check -- *.sha256
+# 如果使用原生 ELF：ZIP 不保留可执行权限，需要手工设置
+chmod 755 mihomo-tui-*-linux-x86_64
+```
+
+arm64 主机将上述文件名后缀替换为 `aarch64`。这是指定提交的测试构建，**不是正式 Release**；
+文件内版本号仍来自 Cargo.toml，不会因普通 push 自动递增。安装前核对提交、架构和校验和。
+CI 只上传已验证的公开发布物，不上传配置、私有快照或隐藏文件。上传失败或存储配额不足会
+使该软件包任务失败，不会假报有下载；可在配额恢复后重跑对应任务，保留期也不能保证绕过账户配额。
+
+### 正式标签发布
 
 标签必须与 Cargo 版本完全一致，例如 `v0.0.1`。质量和安全门禁通过后，CI 会创建或复用一个 GitHub Release 草稿。x86_64 与 aarch64 任务随后进行原生构建和验证，并把文件直接上传到该草稿。最终任务下载全部 12 个文件并逐一校验哈希。草稿必须由维护者审查和发布；重新运行工作流会替换名称相同的草稿附件，而不是创建重复 Release。CI 会拒绝修改已经发布的 Release。
+
+标签发布和托管内核提案继续复用不包含 artifact 上传的打包 action；正式 Release 的跨任务
+文件传递仍直接通过草稿附件，不依赖临时 Actions artifact 存储。
 
 每周运行的托管内核提案工作流使用同一个打包 action。因此，上游版本变更只有在两个架构的 Deb、RPM、原生二进制和一次性安装检查全部通过后，才能创建 Pull Request。
 

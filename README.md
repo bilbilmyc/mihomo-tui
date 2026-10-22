@@ -61,6 +61,11 @@ sudo systemctl enable mihomo.service
 
 ## 安装
 
+正式版本从 [Releases](https://github.com/bilbilmyc/mihomo-tui/releases) 下载。需要最新提交的
+测试构建时，可在 [Actions](https://github.com/bilbilmyc/mihomo-tui/actions/workflows/ci.yml)
+选择已通过的 CI，在底部 **Artifacts** 下载对应架构的软件包（保留 7 天，通常需登录）。
+测试构建不等于新正式版本；解压、校验和与原生 ELF 权限说明见[《Linux 发布物》](docs/release-artifacts.md#下载分支构建)。
+
 ### Deb：Debian / Ubuntu
 
 ```bash

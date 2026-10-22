@@ -689,11 +689,14 @@ mod tests {
         ] {
             assert!(workflow.contains(required), "CI is missing {required}");
         }
-        for forbidden in ["actions/upload-artifact@", "actions/download-artifact@"] {
-            assert!(
-                !workflow.contains(forbidden),
-                "CI must not depend on quota-limited {forbidden}"
-            );
+        for job in [
+            "prepare-draft-release",
+            "release-packages",
+            "verify-draft-release",
+        ] {
+            let definition = serde_yaml::to_string(&jobs[job]).unwrap();
+            assert!(!definition.contains("actions/upload-artifact@"));
+            assert!(!definition.contains("actions/download-artifact@"));
         }
 
         let package_action = include_str!("../.github/actions/build-linux-packages/action.yml");
@@ -716,6 +719,79 @@ mod tests {
                 "package action is missing {verifier}"
             );
         }
+    }
+
+    #[test]
+    fn branch_downloads_require_quality_security_and_verified_architecture_specific_packages() {
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../.github/workflows/ci.yml")).unwrap();
+        let packages = &document["jobs"]["packages"];
+        assert_eq!(
+            packages["needs"],
+            serde_yaml::to_value(["quality", "security-audit"]).unwrap()
+        );
+        assert!(
+            packages["if"]
+                .as_str()
+                .unwrap()
+                .contains("!startsWith(github.ref, 'refs/tags/v')")
+        );
+        let steps = packages["steps"].as_sequence().unwrap();
+        let build = steps
+            .iter()
+            .position(|step| {
+                step["uses"].as_str() == Some("./.github/actions/build-linux-packages")
+            })
+            .unwrap();
+        let uploads = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(uploads.len(), 1);
+        let (upload_index, upload) = uploads[0];
+        assert!(
+            upload_index > build,
+            "only verified packages may be uploaded"
+        );
+        let reference = upload["uses"].as_str().unwrap().split_once('@').unwrap().1;
+        assert_eq!(reference.len(), 40, "artifact action must be commit-pinned");
+        assert!(reference.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            upload.get("if").is_none(),
+            "upload must retain the default success gate"
+        );
+        assert!(
+            upload.get("continue-on-error").is_none(),
+            "an absent download must not be reported as successful"
+        );
+        let inputs = &upload["with"];
+        assert_eq!(
+            inputs["name"].as_str(),
+            Some("mihomo-tui-linux-${{ matrix.rust-architecture }}-${{ github.sha }}")
+        );
+        assert_eq!(inputs["retention-days"].as_u64(), Some(7));
+        assert_eq!(inputs["if-no-files-found"].as_str(), Some("error"));
+        assert_eq!(inputs["include-hidden-files"].as_bool(), Some(false));
+        assert_eq!(
+            inputs["path"].as_str().unwrap().lines().collect::<Vec<_>>(),
+            vec![
+                "dist/*.deb",
+                "dist/*.rpm",
+                "dist/mihomo-tui-*-linux-*",
+                "dist/*.sha256"
+            ]
+        );
+        assert!(
+            document["jobs"]["security-audit"]
+                .get("continue-on-error")
+                .is_none()
+        );
+        assert_eq!(document["permissions"]["contents"].as_str(), Some("read"));
     }
 
     #[test]

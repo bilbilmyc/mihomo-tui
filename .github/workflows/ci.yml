@@ -53,6 +53,7 @@ jobs:
   packages:
     name: packages (${{ matrix.rust-architecture }})
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    needs: [quality, security-audit]
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +72,19 @@ jobs:
         with:
           rust-architecture: ${{ matrix.rust-architecture }}
           debian-architecture: ${{ matrix.debian-architecture }}
+      - name: Upload verified branch packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mihomo-tui-linux-${{ matrix.rust-architecture }}-${{ github.sha }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/mihomo-tui-*-linux-*
+            dist/*.sha256
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: true
 
   prepare-draft-release:
     name: prepare-draft-release

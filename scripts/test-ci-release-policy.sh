@@ -13,9 +13,16 @@ for file in "$ci_workflow" "$package_action" "$sync_workflow"; do
   }
 done
 
+# Only the branch packages job uploads optional-lifetime CI downloads. The shared
+# build action and tag release flow must remain independent of artifact storage.
 if rg -n 'actions/(upload|download)-artifact@|upload-artifact:' \
-  "$ci_workflow" "$package_action" "$sync_workflow"; then
-  echo "CI release builds must not depend on quota-limited workflow artifacts" >&2
+  "$package_action" "$sync_workflow"; then
+  echo "Shared release builds must not depend on workflow artifact storage" >&2
+  exit 1
+fi
+
+if rg -n 'actions/download-artifact@' "$ci_workflow"; then
+  echo "Tag releases must download their verified files directly from the draft Release" >&2
   exit 1
 fi
 
@@ -28,6 +35,13 @@ required_ci_contract=(
   "gh release view \"\$GITHUB_REF_NAME\" --repo \"\$GITHUB_REPOSITORY\" --json isDraft --jq .isDraft"
   "gh release download \"\$GITHUB_REF_NAME\" --repo \"\$GITHUB_REPOSITORY\" --dir release-dist"
   'contents: write'
+  'needs: [quality, security-audit]'
+  'name: Upload verified branch packages'
+  'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'
+  "name: mihomo-tui-linux-\${{ matrix.rust-architecture }}-\${{ github.sha }}"
+  'retention-days: 7'
+  'if-no-files-found: error'
+  'include-hidden-files: false'
 )
 
 for contract in "${required_ci_contract[@]}"; do
